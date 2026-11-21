@@ -1,6 +1,6 @@
 import './style.css'
 import {
-  adminLogin, AdminError, adminRequest, cancelTimeZonePayload, configPayload,
+  adminLogin, AdminError, adminRequest, cancelTimeZonePayload, configPayload, formatQuotaInput, quotaInputBytes,
   type ConfigBaseline, type Dashboard, type HistoryDay, type KeyAction, type Quota, type TimeZoneCancellation,
 } from './model.ts'
 import { chartGeometry, drawTraffic, exactBytes, formatBytes } from './traffic.ts'
@@ -114,6 +114,12 @@ function needsLogin(error: unknown) {
   return true
 }
 
+function showTrafficAmount(target: Element, bytes: number | null, prefix = '') {
+  target.textContent = prefix + formatBytes(bytes)
+  if (bytes === null) target.removeAttribute('title')
+  else target.setAttribute('title', exactBytes(bytes))
+}
+
 function quotaPanel(label: string, quota: Quota, series: string) {
   const card = document.createElement('div')
   card.className = `quota ${series}-series`
@@ -128,14 +134,12 @@ function quotaPanel(label: string, quota: Quota, series: string) {
     <p class="overage"></p>
   `
   card.querySelector('h3')!.textContent = label
-  const amount = card.querySelector('.amount')!
-  amount.textContent = formatBytes(quota.used)
-  amount.setAttribute('title', exactBytes(quota.used))
+  showTrafficAmount(card.querySelector('.amount')!, quota.used)
   card.querySelector<HTMLElement>('.quota-track span')!.style.width = `${ratio * 100}%`
   const [limit, remaining] = card.querySelectorAll('dd')
-  limit.textContent = exactBytes(quota.limit)
-  remaining.textContent = exactBytes(quota.remaining)
-  card.querySelector('.overage')!.textContent = over ? `超出额度 ${exactBytes(quota.used - quota.limit)}` : ''
+  showTrafficAmount(limit, quota.limit)
+  showTrafficAmount(remaining, quota.remaining)
+  if (over) showTrafficAmount(card.querySelector('.overage')!, quota.used - quota.limit, '超出额度 ')
   return card
 }
 
@@ -168,12 +172,12 @@ function renderDashboard(data: Dashboard) {
   const baseline = configBaseline ?? {
     publicLimit: data.public.limit, reservedLimit: data.reserved.limit, keyVersion: data.keyVersion,
   }
-  if (!configBaseline || publicLimit.value === String(baseline.publicLimit)) {
-    publicLimit.value = String(data.public.limit)
+  if (!configBaseline || quotaInputBytes(publicLimit.value) === baseline.publicLimit) {
+    publicLimit.value = formatQuotaInput(data.public.limit)
     baseline.publicLimit = data.public.limit
   }
-  if (!configBaseline || reservedLimit.value === String(baseline.reservedLimit)) {
-    reservedLimit.value = String(data.reserved.limit)
+  if (!configBaseline || quotaInputBytes(reservedLimit.value) === baseline.reservedLimit) {
+    reservedLimit.value = formatQuotaInput(data.reserved.limit)
     baseline.reservedLimit = data.reserved.limit
   }
   if (keyAction.value === 'keep') baseline.keyVersion = data.keyVersion
@@ -233,8 +237,8 @@ function renderSelection() {
   nextDate.setAttribute('aria-disabled', String(dateSelect.selectedIndex === history.length - 1))
   element('history-zone-row').hidden = !row.timeZone
   element('history-zone').textContent = row.timeZone ?? ''
-  element('history-public').textContent = exactBytes(row.public)
-  element('history-reserved').textContent = exactBytes(row.reserved)
+  showTrafficAmount(element('history-public'), row.public)
+  showTrafficAmount(element('history-reserved'), row.reserved)
   drawTraffic(chart, history, dateSelect.selectedIndex)
 }
 

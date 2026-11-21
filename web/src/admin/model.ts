@@ -34,11 +34,37 @@ export function cancelTimeZonePayload({
 }
 
 const maxBytes = 1024 ** 5
+const quotaUnitDigits = { MB: 6, GB: 9 } as const
+
+export function quotaUnit(bytes: number) {
+  const unit = bytes >= 10 ** quotaUnitDigits.GB ? 'GB' : 'MB'
+  return { unit, digits: quotaUnitDigits[unit] }
+}
+
+export function formatQuotaInput(bytes: number) {
+  const { unit, digits } = quotaUnit(bytes)
+  const value = String(bytes).padStart(digits + 1, '0')
+  const fraction = value.slice(-digits).replace(/0+$/, '')
+  return `${value.slice(0, -digits)}${fraction ? `.${fraction}` : ''} ${unit}`
+}
+
+export function quotaInputBytes(raw: string) {
+  const match = /^(\d+)(?:\.(\d+))?\s*(MB|GB)?$/i.exec(raw.trim())
+  if (!match) return undefined
+  const [, whole, fraction = '', unit] = match
+  if (!unit && fraction) return undefined
+  const digits = unit ? quotaUnitDigits[unit.toUpperCase() as keyof typeof quotaUnitDigits] : 0
+  const significantFraction = fraction.replace(/0+$/, '')
+  if (significantFraction.length > digits) return undefined
+  // Shift the decimal as text so that the stored integer is exact.
+  const bytes = Number(whole + significantFraction.padEnd(digits, '0'))
+  return bytes <= maxBytes ? bytes : undefined
+}
 
 function readLimit(raw: string, label: string) {
-  const bytes = Number(raw)
-  if (!/^\d+$/.test(raw) || bytes > maxBytes) {
-    throw new RangeError(`${label}须为 0 到 1 PiB 之间的整数字节数。`)
+  const bytes = quotaInputBytes(raw)
+  if (bytes === undefined) {
+    throw new RangeError(`${label}须为 0 至 1125899.906842624 GB，可使用 MB 或 GB，精确到 1 字节。`)
   }
   return bytes
 }

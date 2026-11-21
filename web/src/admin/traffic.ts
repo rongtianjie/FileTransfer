@@ -1,17 +1,19 @@
-import { seriesRuns, type HistoryDay } from './model.ts'
+import { quotaUnit, seriesRuns, type HistoryDay } from './model.ts'
 
 const series = [
   { field: 'public', lightColor: '#2456bd', darkColor: '#5287f4', dash: [] },
   { field: 'reserved', lightColor: '#8a3e82', darkColor: '#c26db7', dash: [4, 4] },
 ] as const
 
-const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
-const short = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 })
+const short = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
+const small = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 })
 const integer = new Intl.NumberFormat('zh-CN')
 
-export function formatBytes(bytes: number) {
-  const unit = Math.min(units.length - 1, Math.floor(Math.log2(Math.max(bytes, 1)) / 10))
-  return `${short.format(bytes / 1024 ** unit)} ${units[unit]}`
+export function formatBytes(bytes: number | null) {
+  if (bytes === null) return '无数据'
+  const { unit, digits } = quotaUnit(bytes)
+  const amount = bytes / 10 ** digits
+  return `${(amount < 1 ? small : short).format(amount)} ${unit}`
 }
 
 export function exactBytes(bytes: number | null) {
@@ -58,7 +60,7 @@ export function drawTraffic(canvas: HTMLCanvasElement, history: HistoryDay[], se
     ctx.moveTo(left, lineY)
     ctx.lineTo(right, lineY)
     ctx.stroke()
-    ctx.fillText(formatBytes(bytes), left - 8, lineY)
+    ctx.fillText(formatBytes(bytes), left - 8, lineY, left - 12)
   }
 
   const lastIndex = history.length - 1

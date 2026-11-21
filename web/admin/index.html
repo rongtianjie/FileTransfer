@@ -111,19 +111,19 @@
                 <h2 id="settings-title">中继设置</h2>
                 <span class="tip-trigger" tabindex="0" role="button" aria-label="配额设置说明">
                   <span class="help-icon" aria-hidden="true">?</span>
-                  <span class="tip-bubble" id="limit-help" role="tooltip">每日配额按字节为单位填写，每池上限最高为 1 PiB（1,125,899,906,842,624 字节）。</span>
+                  <span class="tip-bubble" id="limit-help" role="tooltip">输入带单位的额度，例如 1.5 GB 或 500 MB。1 GB 等于 1,000 MB。每池最高 1,125,899.906842624 GB。</span>
                 </span>
               </div>
             </div>
             <form id="settings-form">
               <div class="limit-fields">
                 <div>
-                  <label for="public-limit">公共额度（字节）</label>
-                  <input id="public-limit" inputmode="numeric" placeholder="例如：10737418240" aria-describedby="limit-help" required>
+                  <label for="public-limit">公共额度</label>
+                  <input id="public-limit" placeholder="例如 20 GB" aria-describedby="limit-help" required>
                 </div>
                 <div>
-                  <label for="reserved-limit">保留额度（字节）</label>
-                  <input id="reserved-limit" inputmode="numeric" placeholder="例如：53687091200" aria-describedby="limit-help" required>
+                  <label for="reserved-limit">保留额度</label>
+                  <input id="reserved-limit" placeholder="例如 500 MB" aria-describedby="limit-help" required>
                 </div>
               </div>
               <div class="key-fields">

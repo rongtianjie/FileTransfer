@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mountAdminEntry } from '../src/admin/entry.ts'
-import { adminRequest, cancelTimeZonePayload, configPayload, seriesRuns } from '../src/admin/model.ts'
+import { adminRequest, cancelTimeZonePayload, configPayload, formatQuotaInput, quotaInputBytes, seriesRuns } from '../src/admin/model.ts'
+import { formatBytes } from '../src/admin/traffic.ts'
 
 const emptyConfig = { publicLimit: 1, reservedLimit: 2, keyVersion: 0 }
 
@@ -12,6 +13,32 @@ test('config accepts zero and exactly one PiB in integer bytes', () => {
   for (const invalid of ['', '-1', '1.5', '1e6', '1125899906842625']) {
     assert.throws(() => configPayload(invalid, '0', 'keep', '', emptyConfig), RangeError)
   }
+})
+
+test('quota inputs accept decimal MB and GB without losing byte precision', () => {
+  assert.deepEqual(configPayload(' 1.234567891 gb ', '0.000001 MB', 'keep', '', emptyConfig), {
+    publicLimit: 1234567891, reservedLimit: 1, expected: { publicLimit: 1, reservedLimit: 2 },
+  })
+  for (const invalid of ['0.0000001 MB', '1125899.906842625 GB', '1.5 XB']) {
+    assert.throws(() => configPayload(invalid, '0 MB', 'keep', '', emptyConfig), RangeError)
+  }
+  assert.equal(configPayload('0.000001 MB', '0.000002 MB', 'keep', '', emptyConfig), null)
+  for (const [bytes, display] of [
+    [0, '0 MB'], [1, '0.000001 MB'], [999999999, '999.999999 MB'],
+    [1000000000, '1 GB'], [20000000000, '20 GB'], [2 ** 50, '1125899.906842624 GB'],
+  ]) {
+    assert.equal(formatQuotaInput(bytes), display)
+    assert.equal(quotaInputBytes(display), bytes)
+  }
+})
+
+test('traffic uses decimal MB and GB and keeps tiny nonzero amounts visible', () => {
+  assert.equal(formatBytes(0), '0 MB')
+  assert.equal(formatBytes(1), '0.000001 MB')
+  assert.equal(formatBytes(500000000), '500 MB')
+  assert.equal(formatBytes(1000000000), '1 GB')
+  assert.equal(formatBytes(20000000000), '20 GB')
+  assert.equal(formatBytes(null), '无数据')
 })
 
 test('config sends a key only when replacing it, preserving the supplied bytes', () => {
