@@ -1,6 +1,6 @@
 import './style.css'
 import { Session } from './session.ts'
-import { MAX_FILE } from './transfer.ts'
+import type { Transfer } from './transfer.ts'
 import { mountAdminEntry } from './admin/entry.ts'
 
 type PickerWindow = Window & {
@@ -34,7 +34,7 @@ app.innerHTML = `
     <section class="console" aria-label="传输控制台">
       <div class="route" id="route">
         <div class="endpoint"><span class="terminal" aria-hidden="true"></span><span>本机</span></div>
-        <div class="path"><span id="path-label" class="tip-trigger tip-text"><span id="path-text">等待建立连接</span><span id="path-tip" class="tip-bubble" role="tooltip">两端加入相同房间后，将自动建立安全传输通道。</span></span></div>
+        <div class="path"><span id="path-label" class="tip-trigger tip-text" tabindex="0" aria-describedby="path-tip"><span id="path-text">等待建立连接</span><span id="path-tip" class="tip-bubble" role="tooltip">两端加入相同房间后，将自动建立安全传输通道。</span></span></div>
         <div class="endpoint"><span class="terminal" aria-hidden="true"></span><span>对方</span></div>
       </div>
       <div class="workspace">
@@ -43,9 +43,10 @@ app.innerHTML = `
             <h2>创建房间</h2>
             <div class="field-label">
               <label for="create-code">自定义房间码<span class="optional">（可选）</span></label>
-              <span class="tip-trigger" tabindex="0" role="button" aria-label="房间码说明">
+              <span class="tip-trigger" tabindex="0" aria-describedby="create-tip">
+                <span class="sr-only">房间码说明</span>
                 <span class="help-icon" aria-hidden="true">?</span>
-                <span class="tip-bubble" role="tooltip">可填入 4 位数字作为专属房间码；留空将由系统自动分配。</span>
+                <span id="create-tip" class="tip-bubble" role="tooltip">可填入 4 位数字作为专属房间码；留空将由系统自动分配。</span>
               </span>
             </div>
             <input id="create-code" name="code" placeholder="留空自动生成 4 位房间码" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" title="请输入 4 位数字" spellcheck="false" autocomplete="off">
@@ -55,9 +56,10 @@ app.innerHTML = `
             <h2>加入房间</h2>
             <div class="field-label">
               <label for="join-code">对方的房间码</label>
-              <span class="tip-trigger" tabindex="0" role="button" aria-label="加入房间说明">
+              <span class="tip-trigger" tabindex="0" aria-describedby="join-tip">
+                <span class="sr-only">加入房间说明</span>
                 <span class="help-icon" aria-hidden="true">?</span>
-                <span class="tip-bubble" role="tooltip">输入对方创建房间后分享的 4 位数字代码，对方确认同意后即可连接。</span>
+                <span id="join-tip" class="tip-bubble" role="tooltip">输入对方创建房间后分享的 4 位数字代码，对方确认同意后即可连接。</span>
               </span>
             </div>
             <input id="join-code" name="code" placeholder="输入 4 位数字房间码" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" title="请输入 4 位数字" spellcheck="false" autocomplete="off" required>
@@ -69,15 +71,17 @@ app.innerHTML = `
         <button id="reconnect" class="secondary" type="button" data-action="reconnect" hidden>重新连接服务</button>
       </div>
     </section>
+    <div id="save-notices"></div>
     <footer>
-      <span class="tip-trigger tip-text">无需注册<span class="tip-bubble" role="tooltip">开箱即用，无需登录或绑定个人账号，保障数据隐私。</span></span>
-      <span class="tip-trigger tip-text">支持大文件传输<span class="tip-bubble" role="tooltip">采用高效流式分块传输，单文件支持高达 2 GiB。</span></span>
-      <span class="tip-trigger tip-text">端到端加密<span class="tip-bubble" role="tooltip">基于 WebRTC 原生 DTLS/SCTP 加密协议，传输数据不经第三方留存。</span></span>
-      <span class="tip-trigger tip-text">${desktopChromium ? '极速流式落盘' : '实验性浏览器环境'}<span class="tip-bubble" role="tooltip">${desktopChromium ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : '当前浏览器可能缺乏流式磁盘写入支持，建议使用桌面版 Chrome 或 Edge 获得最佳体验。'}</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="signup-tip">无需注册<span id="signup-tip" class="tip-bubble" role="tooltip">开箱即用，无需登录或绑定个人账号，保障数据隐私。</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="size-tip">支持大文件传输<span id="size-tip" class="tip-bubble" role="tooltip">采用高效流式分块传输，单文件支持高达 2 GiB。</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="encryption-tip">端到端加密<span id="encryption-tip" class="tip-bubble" role="tooltip">基于 WebRTC 原生 DTLS/SCTP 加密协议，传输数据不经第三方留存。</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${desktopChromium ? '极速流式落盘' : '实验性浏览器环境'}<span id="storage-tip" class="tip-bubble" role="tooltip">${desktopChromium ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : '当前浏览器可能缺乏流式磁盘写入支持，建议使用桌面版 Chrome 或 Edge 获得最佳体验。'}</span></span>
     </footer>
   </main>
   <input id="file-input" type="file" hidden>
   <div id="announcement" class="sr-only" role="status"></div>
+  <div id="save-announcement" class="sr-only" role="status"></div>
 `
 
 const find = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -90,6 +94,9 @@ let roomMarkup = ''
 let keyValue = ''
 let keyRoom = ''
 let copyMessage = ''
+let copyRequest = 0
+let fileTarget: Transfer | undefined
+let saveMarkup = ''
 let lastTransferPhase = ''
 let scheduled = false
 
@@ -121,7 +128,8 @@ const phases: Record<string, string> = {
   sending: '正在发送文件…',
   receiving: '正在接收文件…',
   saving: '正在完成写入…',
-  confirming: '等待对方完成写入…',
+  confirming: '等待对方确认保存…',
+  unconfirmed: '保存结果未确认',
   done: '文件传输完成',
   stopped: '传输已停止',
 }
@@ -130,20 +138,23 @@ function transferMarkup() {
   const transfer = session.transfer
   const view = transfer?.view
   const phase = view?.phase ?? 'idle'
-  const free = phase === 'idle' || phase === 'done' || phase === 'stopped'
+  const free = Boolean(transfer?.canOffer)
+  const disabled = session.switchingRelay || session.savingAfterDisconnect
+  const blocked = disabled ? 'disabled' : ''
   const progress = ['sending', 'receiving', 'saving', 'confirming', 'done'].includes(phase)
   return `
     <section class="transfer" aria-labelledby="transfer-title">
       <div class="transfer-head">
         <h2 id="transfer-title">${phase === 'idle' ? '传输文件' : phases[phase]}</h2>
-        ${free ? '<button class="primary" type="button" data-action="select">选择文件</button>' : ''}
+        ${free || disabled ? `<button class="primary" type="button" data-action="select" ${blocked}>选择文件</button>` : ''}
       </div>
       ${view?.name ? `<p class="file-name"><bdi>${html(view.name)}</bdi><span>${bytes(view.size)}</span></p>` : ''}
       ${progress ? '<div class="progress"><progress id="progress" aria-label="已写入的字节数" max="1" value="0"></progress><span id="progress-text"></span></div>' : ''}
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
-      ${phase === 'idle' ? '<p class="muted">点击上方“选择文件”即可发送；双方任意一台设备均可发起传输。</p>' : ''}
+      ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
+      ${phase === 'idle' && free ? '<p class="muted">点击上方“选择文件”即可发送；双方任意一台设备均可发起传输。</p>' : ''}
       ${phase === 'offered' ? '<div class="button-row"><button class="primary" type="button" data-action="save">选择位置并接收</button><button class="secondary" type="button" data-action="cancel">拒收</button></div>' : ''}
-      ${!free && phase !== 'saving' && phase !== 'confirming' && phase !== 'offered' ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
+      ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
       ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
     </section>
   `
@@ -152,20 +163,20 @@ function transferMarkup() {
 function relayMarkup() {
   if (session.phase !== 'failed' && !session.canUpgrade) {
     if (session.mode === 'relay' && session.phase === 'connected' && session.upgradeBytes !== undefined) {
-      return '<p class="muted">当前中继流量已达上限，暂无更多可用额度。</p>'
+      return '<p class="muted">当前中继余量不足以传输此文件。</p>'
     }
     return ''
   }
+  const disabled = (session.busy || (session.phase === 'connected' && !session.transfer?.canOffer)) ? 'disabled' : ''
   if (session.role === 'guest') {
     return session.phase === 'failed'
       ? '<p class="muted">两端直连受限，等待房主重试直连或切换中继模式…</p>'
-      : '<div class="relay-options"><p class="muted">当前中继公用流量已用尽，可提醒房主输入专属密钥解锁额外流量。</p><button type="button" class="secondary" data-action="ask">提醒房主输入密钥</button></div>'
+      : `<div class="relay-options"><p class="muted">当前公用中继余量不足以传输此文件，可提醒房主输入专属密钥。</p><button type="button" class="secondary" data-action="ask" ${disabled}>提醒房主输入密钥</button></div>`
   }
-  const disabled = session.busy ? 'disabled' : ''
   return `
     <div class="relay-options">
       ${session.phase === 'failed' && session.relayAvailable ? '<p class="muted">两端未能直接连通。您可以重试建立直连，或开启加密中继模式由服务器协助转发。</p>' : ''}
-      ${session.canUpgrade ? '<p class="muted">当前公用中继流量已用尽。若持有管理员分配的专属密钥，可在下方输入解锁：</p>' : ''}
+      ${session.canUpgrade ? '<p class="muted">当前公用中继余量不足以传输此文件。若持有管理员分配的专属密钥，可在下方输入。</p>' : ''}
       <div class="button-row">
         ${session.phase === 'failed' ? `<button class="primary" type="button" data-action="direct" ${disabled}>重试直连</button>` : ''}
         ${session.phase === 'failed' && session.relayAvailable ? `<button class="secondary" type="button" data-action="relay" ${disabled}>${session.mode === 'relay' ? '重试加密中继' : '启用加密中继'}</button>` : ''}
@@ -174,9 +185,10 @@ function relayMarkup() {
         <form class="key-form" data-form="key">
           <div class="field-label">
             <label for="relay-key">中继密钥</label>
-            <span class="tip-trigger" tabindex="0" role="button" aria-label="中继密钥说明">
+            <span class="tip-trigger" tabindex="0" aria-describedby="key-tip">
+              <span class="sr-only">中继密钥说明</span>
               <span class="help-icon" aria-hidden="true">?</span>
-              <span class="tip-bubble" role="tooltip">由中继服务管理员提供，用于解除公用中继流量限制。</span>
+              <span id="key-tip" class="tip-bubble" role="tooltip">由中继服务管理员提供，用于解除公用中继流量限制。</span>
             </span>
           </div>
           <div class="button-row">
@@ -209,6 +221,7 @@ function roomContent() {
         <button class="plain leave" type="button" data-action="leave">离开房间</button>
       </div>
     </div>
+    ${host ? '<p id="copy-feedback" class="copy-feedback muted" role="status"></p>' : ''}
     <div class="room-status">
       <h2 id="room-heading" tabindex="-1">${heading}</h2>
       ${session.mode === 'relay' && session.phase === 'connected' ? `<span class="balance" id="relay-balance"></span>` : ''}
@@ -241,14 +254,12 @@ function draw() {
   home.hidden = !idle
   room.hidden = idle
   const codeKey = idle ? '' : session.code
-  if (stateChanged && session.phase === 'connecting') {
-    keyValue = ''
-    copyMessage = ''
-  }
+  if (stateChanged && session.phase === 'connecting') keyValue = ''
   if (codeKey !== keyRoom) {
     keyRoom = codeKey
     keyValue = ''
     copyMessage = ''
+    copyRequest++
   }
   for (const control of home.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')) {
     control.disabled = Boolean(supportIssue) || session.socketState !== 'open' || session.busy
@@ -311,6 +322,7 @@ function draw() {
     if (stateChanged) home.querySelector<HTMLInputElement>('input:not(:disabled)')?.focus()
   }
 
+  setText('copy-feedback', copyMessage)
   if (find('relay-balance')) {
     const remaining = session.remaining
     setText('relay-balance', (session.authorized ? '专属额度' : '中继余量') +
@@ -329,10 +341,33 @@ function draw() {
     setText('announcement', transferPhase ? (phases[view!.phase] || '') : '')
     lastTransferPhase = transferPhase
   }
+  const unknown = session.unconfirmedSave
+  const detached = session.detachedSave
+  const waitingSave = session.savingAfterDisconnect ? '连接已断开，仍在完成本地文件保存。' : ''
+  const localResult = detached?.saved ? '文件已保存到本机。' : '文件保存失败。'
+  const remoteResult = unknown && view?.phase !== 'unconfirmed' ? unknown : undefined
+  const saves = `
+    ${remoteResult ? saveNotice('dismiss-unconfirmed', remoteResult.name, remoteResult.message) : ''}
+    ${waitingSave ? `<p class="notice">${waitingSave}</p>` : ''}
+    ${detached ? saveNotice('dismiss-detached', detached.name, localResult) : ''}`
+  if (saves !== saveMarkup) {
+    find('save-notices').innerHTML = saves
+    saveMarkup = saves
+    setText('save-announcement', [
+      remoteResult && `${remoteResult.name} ${remoteResult.message}`,
+      waitingSave,
+      detached && `${detached.name} ${localResult}`,
+    ].filter(Boolean).join(' '))
+  }
+
   const notice = find('notice')
-  const message = supportIssue || session.message || copyMessage || (session.busy && idle ? '正在处理房间请求…' : '')
+  const message = supportIssue || session.message || (session.busy && idle ? '正在处理房间请求…' : '')
   if (notice.textContent !== message) notice.textContent = message
   notice.hidden = !message
+}
+
+function saveNotice(action: string, name: string, message: string) {
+  return `<div class="notice save-notice"><p><bdi>${html(name)}</bdi> · ${html(message)}</p><button class="plain" type="button" data-action="${action}">关闭提示</button></div>`
 }
 
 app.addEventListener('submit', event => {
@@ -369,26 +404,34 @@ app.addEventListener('click', event => {
     case 'copy':
       if (session.code) {
         const code = session.code
+        const request = ++copyRequest
         const copying = navigator.clipboard?.writeText(code) ?? Promise.reject()
         void copying.then(
-          () => { if (session.code === code) copyMessage = '房间码已复制到剪贴板。' },
-          () => { if (session.code === code) copyMessage = '无法自动复制，请手动选中房间码。' },
+          () => { if (copyRequest === request && session.code === code) copyMessage = '房间码已复制到剪贴板。' },
+          () => { if (copyRequest === request && session.code === code) copyMessage = '无法自动复制，请手动选中房间码。' },
         ).finally(render)
       }
       break
-    case 'leave': session.leave(); break
+    case 'leave':
+      copyRequest++
+      copyMessage = ''
+      session.leave()
+      break
+    case 'dismiss-unconfirmed': session.unconfirmedSave = undefined; render(); break
+    case 'dismiss-detached': session.detachedSave = undefined; render(); break
     case 'accept': session.answer(true, button?.dataset.requestId); break
     case 'reject': session.answer(false, button?.dataset.requestId); break
     case 'direct': session.retryDirect(); break
     case 'relay': session.relay(); break
-    case 'ask':
-      transfer?.requestUpgrade()
-      copyMessage = '已提醒房主输入中继密钥。'
-      render()
-      break
+    case 'ask': session.askForUpgrade(); break
     case 'cancel': transfer?.cancel(); break
     case 'resend': if (session.phase === 'connected') transfer?.retry(); break
-    case 'select': if (session.phase === 'connected') fileInput.click(); break
+    case 'select':
+      if (session.phase === 'connected' && transfer?.canOffer) {
+        fileTarget = transfer
+        fileInput.click()
+      }
+      break
     case 'save':
       if (picker && transfer && session.phase === 'connected') {
         const name = transfer.view.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '接收的文件'
@@ -401,9 +444,43 @@ app.addEventListener('click', event => {
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0]
   fileInput.value = ''
-  if (!file || session.phase !== 'connected') return
-  if (file.size <= MAX_FILE) copyMessage = ''
-  session.transfer?.offer(file)
+  const target = fileTarget
+  fileTarget = undefined
+  if (file && session.phase === 'connected' && session.transfer === target) target?.offer(file)
+})
+
+function tooltipTrigger(target: EventTarget | null) {
+  return target instanceof Element ? target.closest<HTMLElement>('.tip-trigger') : null
+}
+
+for (const eventName of ['pointerover', 'focusin']) {
+  app.addEventListener(eventName, event => {
+    const trigger = tooltipTrigger(event.target)
+    const bubble = trigger?.querySelector<HTMLElement>(':scope > .tip-bubble')
+    if (!trigger || !bubble) return
+    const { left, width } = trigger.getBoundingClientRect()
+    const idealLeft = left + (width - bubble.offsetWidth) / 2
+    const rightLimit = document.documentElement.clientWidth - bubble.offsetWidth - 8
+    const shift = Math.max(8, Math.min(idealLeft, rightLimit)) - idealLeft
+    bubble.style.setProperty('--tip-shift', `${shift}px`)
+  })
+}
+
+for (const eventName of ['pointerout', 'focusout'] as const) {
+  app.addEventListener(eventName, event => {
+    const trigger = tooltipTrigger(event.target)
+    if (!trigger || tooltipTrigger(event.relatedTarget) === trigger) return
+    if (eventName === 'focusout' ? !trigger.matches(':hover') : document.activeElement !== trigger) {
+      delete trigger.dataset.tipDismissed
+    }
+  })
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return
+  for (const trigger of app.querySelectorAll<HTMLElement>('.tip-trigger:is(:focus, :hover)')) {
+    trigger.dataset.tipDismissed = ''
+  }
 })
 
 draw()

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const maxQuotaBytes = 1 << 50
@@ -20,6 +21,7 @@ type relayOverrides struct {
 }
 
 type adminSettings struct {
+	mu                       sync.Mutex // Serializes updates and dashboard snapshots of the settings.
 	path                     string
 	publicBase, reservedBase int64
 	values                   relayOverrides

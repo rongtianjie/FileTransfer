@@ -8,6 +8,8 @@ import (
 
 const defaultSettlementZone = "Asia/Shanghai"
 
+var errTimeZoneConflict = errors.New("settlement time zone schedule changed")
+
 func loadSettlementZone(name string) (*time.Location, error) {
 	if name == "" || name == "Local" || len(name) > 128 {
 		return nil, errors.New("expected an IANA time zone")
@@ -47,12 +49,7 @@ func (l *dailyLedger) scheduleTimeZone(zone *time.Location) error {
 	now := l.now()
 	l.advanceDay(now)
 	if l.durable.PendingTimeZone == zone.String() || (l.pending == nil && l.zone.String() == zone.String()) {
-		ok := l.persistPending()
-		l.publish()
-		if !ok {
-			return errors.New("could not persist settlement day")
-		}
-		return nil
+		return l.saveCurrentDay()
 	}
 
 	next, active, pending := l.planTimeZone(now, zone)
@@ -61,7 +58,7 @@ func (l *dailyLedger) scheduleTimeZone(zone *time.Location) error {
 
 func (l *dailyLedger) planTimeZone(now time.Time, zone *time.Location) (usageFile, *time.Location, *time.Location) {
 	next := l.durable
-	if l.inactive && l.durable.Unobserved && l.durable.Public == 0 && l.durable.Reserved == 0 {
+	if l.pending == nil && l.inactive && l.durable.Unobserved && l.durable.Public == 0 && l.durable.Reserved == 0 {
 		next.Day = now.In(zone).Format(time.DateOnly)
 		// If the new local date already has an archived point, keep that
 		// point and switch on a later boundary instead.
@@ -72,16 +69,50 @@ func (l *dailyLedger) planTimeZone(now time.Time, zone *time.Location) (usageFil
 		next.Day = l.durable.Day
 	}
 
-	floor := next.SwitchAt
+	next.PendingTimeZone = zone.String()
+	next.SwitchAt = l.nextTimeZoneBoundary(now, zone)
+	return next, l.zone, zone
+}
+
+func (l *dailyLedger) cancelTimeZone(expectedZone string, expectedAt time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failed {
+		return errors.New("quota ledger is unavailable")
+	}
+	now := l.now()
+	if l.pending == nil || l.durable.PendingTimeZone == l.zone.String() ||
+		l.durable.PendingTimeZone != expectedZone || !l.durable.SwitchAt.Equal(expectedAt) ||
+		!now.Before(l.durable.SwitchAt) {
+		return errTimeZoneConflict
+	}
+
+	// Keep the current bucket and persist a same-zone transition so a restart
+	// cannot reset it before the previously announced deadline.
+	next := l.durable
+	next.PendingTimeZone = l.zone.String()
+	next.SwitchAt = l.nextTimeZoneBoundary(now, l.zone)
+	return l.saveSchedule(next, l.zone, l.zone)
+}
+
+func (l *dailyLedger) saveCurrentDay() error {
+	ok := l.persistPending()
+	l.publish()
+	if !ok {
+		return errors.New("could not persist settlement day")
+	}
+	return nil
+}
+
+func (l *dailyLedger) nextTimeZoneBoundary(now time.Time, zone *time.Location) time.Time {
+	floor := l.durable.SwitchAt
+	nextDay := followingDay(l.durable.Day)
 	if floor.IsZero() {
-		floor = firstSettlementBoundary(now, followingDay(next.Day), l.zone)
+		floor = firstSettlementBoundary(now, nextDay, l.zone)
 	}
 	// A new bucket must have a later date label so records aren't merged
 	// when the administrator moves the clock west.
-	target := followingDay(now.In(zone).Format(time.DateOnly))
-	if target <= next.Day {
-		target = followingDay(next.Day)
-	}
+	target := max(followingDay(now.In(zone).Format(time.DateOnly)), nextDay)
 	switchAt := firstSettlementBoundary(now, target, zone)
 	if switchAt.Before(floor) {
 		floorDay := floor.In(zone).Format(time.DateOnly)
@@ -91,8 +122,7 @@ func (l *dailyLedger) planTimeZone(now time.Time, zone *time.Location) (usageFil
 			switchAt = firstSettlementBoundary(floor, followingDay(floorDay), zone)
 		}
 	}
-	next.PendingTimeZone, next.SwitchAt = zone.String(), switchAt.UTC()
-	return next, l.zone, zone
+	return switchAt.UTC()
 }
 
 func (l *dailyLedger) saveSchedule(next usageFile, zone, pending *time.Location) error {

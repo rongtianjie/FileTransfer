@@ -31,14 +31,24 @@ type admin struct {
 	settings           *adminSettings
 	hub                *hub
 	ledger             *dailyLedger
+	persistSettings    func(string, any) error
 }
 
 type configUpdate struct {
-	PublicLimit   *int64 `json:"publicLimit"`
-	ReservedLimit *int64 `json:"reservedLimit"`
-	KeyAction     string `json:"keyAction"`
-	Key           string `json:"key"`
+	PublicLimit   *int64          `json:"publicLimit"`
+	ReservedLimit *int64          `json:"reservedLimit"`
+	KeyAction     string          `json:"keyAction"`
+	Key           string          `json:"key"`
+	Expected      *configExpected `json:"expected"`
 }
+
+type configExpected struct {
+	PublicLimit   *int64  `json:"publicLimit"`
+	ReservedLimit *int64  `json:"reservedLimit"`
+	KeyVersion    *uint64 `json:"keyVersion"`
+}
+
+var errConfigConflict = errors.New("relay settings changed")
 
 type roomStats struct {
 	Active   int               `json:"active"`
@@ -51,6 +61,7 @@ type adminDashboard struct {
 	ledgerView
 	TurnEnabled   bool      `json:"turnEnabled"`
 	KeyConfigured bool      `json:"keyConfigured"`
+	KeyVersion    uint64    `json:"keyVersion"`
 	Rooms         roomStats `json:"rooms"`
 }
 
@@ -58,7 +69,7 @@ func newAdmin(username, password string, settings *adminSettings, h *hub, ledger
 	return &admin{
 		username: sha256.Sum256([]byte(username)), password: sha256.Sum256([]byte(password)),
 		sessions: make(map[string]time.Time), attempts: make(map[string]rateWindow),
-		now: time.Now, settings: settings, hub: h, ledger: ledger,
+		now: time.Now, settings: settings, hub: h, ledger: ledger, persistSettings: persistJSON,
 	}
 }
 
@@ -70,6 +81,7 @@ func (a *admin) register(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("GET /api/admin/dashboard", a.guard(true, a.dashboard))
 	mux.HandleFunc("PUT /api/admin/config", a.guard(true, a.configure))
+	mux.HandleFunc("PATCH /api/admin/config", a.guard(true, a.configure))
 	mux.HandleFunc("PUT /api/admin/time-zone", a.guard(true, a.configureTimeZone))
 }
 
@@ -217,11 +229,19 @@ func (a *admin) dashboard(w http.ResponseWriter, r *http.Request) {
 		adminProblem(w, http.StatusBadRequest, "请选择 7、30 或 90 天。")
 		return
 	}
+	a.settings.mu.Lock()
+	ledger := a.ledger.view(days)
+	if ledger.PendingTimeZone == ledger.TimeZone {
+		// A same-zone transition carries the reset deadline after cancellation.
+		ledger.PendingTimeZone = ""
+	}
 	a.hub.mu.Lock()
 	view := adminDashboard{
-		ledgerView: a.ledger.view(days), KeyConfigured: a.hub.hasKey, TurnEnabled: a.hub.router != nil, Rooms: a.hub.stats(),
+		ledgerView: ledger, KeyConfigured: a.hub.hasKey, KeyVersion: a.hub.keyGeneration,
+		TurnEnabled: a.hub.router != nil, Rooms: a.hub.stats(),
 	}
 	a.hub.mu.Unlock()
+	a.settings.mu.Unlock()
 	writeAdminJSON(w, http.StatusOK, view)
 }
 
@@ -253,8 +273,32 @@ func (a *admin) configure(w http.ResponseWriter, r *http.Request) {
 	if !readAdminJSON(w, r, &input) {
 		return
 	}
-	if input.PublicLimit == nil || input.ReservedLimit == nil ||
-		!validQuota(*input.PublicLimit) || !validQuota(*input.ReservedLimit) {
+	expected := input.Expected
+	if r.Method == http.MethodPatch {
+		if input.KeyAction == "" {
+			input.KeyAction = "keep"
+		}
+		if expected == nil ||
+			(input.PublicLimit == nil) != (expected.PublicLimit == nil) ||
+			(input.ReservedLimit == nil) != (expected.ReservedLimit == nil) ||
+			(input.KeyAction == "keep") != (expected.KeyVersion == nil) ||
+			(input.PublicLimit == nil && input.ReservedLimit == nil && input.KeyAction == "keep") {
+			adminProblem(w, http.StatusBadRequest, "请提交要修改的设置及其原值。")
+			return
+		}
+	} else {
+		if expected == nil {
+			adminProblem(w, http.StatusConflict, "此页面提交的设置缺少原值。请刷新管理后台页面后重新编辑。")
+			return
+		}
+		if input.PublicLimit == nil || input.ReservedLimit == nil ||
+			expected.PublicLimit == nil || expected.ReservedLimit == nil || expected.KeyVersion == nil {
+			adminProblem(w, http.StatusBadRequest, "完整更新须提供两类额度及其原值，以及当前密钥版本。")
+			return
+		}
+	}
+	if (input.PublicLimit != nil && !validQuota(*input.PublicLimit)) ||
+		(input.ReservedLimit != nil && !validQuota(*input.ReservedLimit)) {
 		adminProblem(w, http.StatusBadRequest, "额度必须为 0 到 1 PiB 之间的整数字节数。")
 		return
 	}
@@ -265,6 +309,10 @@ func (a *admin) configure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.update(input); err != nil {
+		if errors.Is(err, errConfigConflict) {
+			adminProblem(w, http.StatusConflict, "要修改的设置已被更新。请刷新并核对最新设置后重新编辑。")
+			return
+		}
 		log.Printf("persist Admin relay settings: %v", err)
 		adminProblem(w, http.StatusInternalServerError, "中继设置未能确认保存，请检查服务日志和数据卷。")
 		return
@@ -274,17 +322,39 @@ func (a *admin) configure(w http.ResponseWriter, r *http.Request) {
 
 func (a *admin) configureTimeZone(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		TimeZone string `json:"timeZone"`
+		TimeZone                    string    `json:"timeZone"`
+		Action                      string    `json:"action"`
+		ExpectedPendingTimeZone     string    `json:"expectedPendingTimeZone"`
+		ExpectedTimeZoneEffectiveAt time.Time `json:"expectedTimeZoneEffectiveAt"`
 	}
 	if !readAdminJSON(w, r, &input) {
 		return
 	}
-	zone, err := loadSettlementZone(input.TimeZone)
-	if err != nil {
-		adminProblem(w, http.StatusBadRequest, "无法识别浏览器时区。")
+	var err error
+	switch {
+	case input.Action == "cancel" && input.TimeZone == "":
+		if input.ExpectedPendingTimeZone == "" || input.ExpectedTimeZoneEffectiveAt.IsZero() {
+			adminProblem(w, http.StatusBadRequest, "取消切换须提供计划中的时区及其生效时间。")
+			return
+		}
+		err = a.ledger.cancelTimeZone(input.ExpectedPendingTimeZone, input.ExpectedTimeZoneEffectiveAt)
+	case input.Action == "" && input.ExpectedPendingTimeZone == "" && input.ExpectedTimeZoneEffectiveAt.IsZero():
+		var zone *time.Location
+		zone, err = loadSettlementZone(input.TimeZone)
+		if err != nil {
+			adminProblem(w, http.StatusBadRequest, "无法识别所选时区。")
+			return
+		}
+		err = a.ledger.scheduleTimeZone(zone)
+	default:
+		adminProblem(w, http.StatusBadRequest, "时区操作无效。")
 		return
 	}
-	if err := a.ledger.scheduleTimeZone(zone); err != nil {
+	if err != nil {
+		if errors.Is(err, errTimeZoneConflict) {
+			adminProblem(w, http.StatusConflict, "时区切换计划已变化或已生效。请刷新并核对当前计划。")
+			return
+		}
 		log.Printf("persist settlement time zone: %v", err)
 		adminProblem(w, http.StatusInternalServerError, "时区未能保存，请检查服务日志和数据卷。")
 		return
@@ -294,15 +364,36 @@ func (a *admin) configureTimeZone(w http.ResponseWriter, r *http.Request) {
 
 func (a *admin) update(input configUpdate) error {
 	h := a.hub
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	a.settings.mu.Lock()
+	defer a.settings.mu.Unlock()
+
+	expected := input.Expected
+	changeKey := input.KeyAction == "replace" || input.KeyAction == "clear"
+	if expected == nil || (input.PublicLimit != nil && expected.PublicLimit == nil) ||
+		(input.ReservedLimit != nil && expected.ReservedLimit == nil) || (changeKey && expected.KeyVersion == nil) {
+		return errConfigConflict
+	}
+	public, reserved := a.settings.limits()
+	// All writes to the hub key after startup are serialized by settings.mu.
+	if (expected.PublicLimit != nil && *expected.PublicLimit != public) ||
+		(expected.ReservedLimit != nil && *expected.ReservedLimit != reserved) ||
+		(expected.KeyVersion != nil && *expected.KeyVersion != h.keyGeneration) {
+		return errConfigConflict
+	}
 	if a.ledger != nil {
+		// Serialize charging with persistence and publication. Signaling can
+		// continue reading the last published quota snapshot in the meantime.
 		a.ledger.mu.Lock()
 		defer a.ledger.mu.Unlock()
 	}
 	next := a.settings.values
-	next.PublicLimit, next.ReservedLimit = input.PublicLimit, input.ReservedLimit
-	if input.KeyAction != "keep" {
+	if input.PublicLimit != nil {
+		next.PublicLimit = input.PublicLimit
+	}
+	if input.ReservedLimit != nil {
+		next.ReservedLimit = input.ReservedLimit
+	}
+	if changeKey {
 		digest := ""
 		if input.KeyAction == "replace" {
 			sum := sha256.Sum256([]byte(input.Key))
@@ -310,7 +401,7 @@ func (a *admin) update(input configUpdate) error {
 		}
 		next.KeyDigest = &digest
 	}
-	if err := persistJSON(a.settings.path, next); err != nil {
+	if err := a.persistSettings(a.settings.path, next); err != nil {
 		var uncertain replacedFileError
 		if a.ledger != nil && errors.As(err, &uncertain) {
 			a.ledger.settingsUncertain = true
@@ -318,13 +409,15 @@ func (a *admin) update(input configUpdate) error {
 		}
 		return err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	a.settings.values = next
 	if a.ledger != nil {
 		a.ledger.publicLimit, a.ledger.reserveLimit = a.settings.limits()
 		a.ledger.settingsUncertain = false
 		a.ledger.publish()
 	}
-	if input.KeyAction != "keep" {
+	if changeKey {
 		h.applyKeyDigest(next.KeyDigest)
 		for c := range h.clients {
 			c.send(response{Type: "config", RelayAvailable: h.router != nil, KeyAvailable: h.hasKey})

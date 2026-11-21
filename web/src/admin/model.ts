@@ -1,4 +1,5 @@
 export type KeyAction = 'keep' | 'replace' | 'clear'
+export type ConfigBaseline = { publicLimit: number; reservedLimit: number; keyVersion: number }
 export type Quota = { used: number; limit: number; remaining: number }
 export type HistoryDay = { day: string; timeZone?: string; public: number | null; reserved: number | null }
 export type Dashboard = {
@@ -12,6 +13,24 @@ export type Dashboard = {
   history: HistoryDay[]
   rooms: { active: number; direct: number; relay: number; failures: Record<string, number> }
   keyConfigured: boolean
+  keyVersion: number
+}
+
+export type TimeZoneCancellation = {
+  action: 'cancel'
+  expectedPendingTimeZone: string
+  expectedTimeZoneEffectiveAt: string
+}
+
+export function cancelTimeZonePayload({
+  pendingTimeZone, timeZoneEffectiveAt,
+}: Pick<Dashboard, 'pendingTimeZone' | 'timeZoneEffectiveAt'>): TimeZoneCancellation | null {
+  if (!pendingTimeZone || !timeZoneEffectiveAt) return null
+  return {
+    action: 'cancel',
+    expectedPendingTimeZone: pendingTimeZone,
+    expectedTimeZoneEffectiveAt: timeZoneEffectiveAt,
+  }
 }
 
 const maxBytes = 1024 ** 5
@@ -24,13 +43,28 @@ function readLimit(raw: string, label: string) {
   return bytes
 }
 
-export function configPayload(publicInput: string, reservedInput: string, keyAction: KeyAction, key: string) {
+export function configPayload(publicInput: string, reservedInput: string, keyAction: KeyAction, key: string, baseline: ConfigBaseline) {
   const publicLimit = readLimit(publicInput, '公共额度')
   const reservedLimit = readLimit(reservedInput, '保留额度')
   if (keyAction === 'replace' && (!key.trim() || new TextEncoder().encode(key).length > 512)) {
     throw new RangeError('请输入 1 到 512 字节的中继密钥。')
   }
-  return { publicLimit, reservedLimit, keyAction, ...(keyAction === 'replace' ? { key } : {}) }
+  const expected: Partial<ConfigBaseline> = {}
+  const changes: { publicLimit?: number; reservedLimit?: number; keyAction?: KeyAction; key?: string } = {}
+  if (publicLimit !== baseline.publicLimit) {
+    changes.publicLimit = publicLimit
+    expected.publicLimit = baseline.publicLimit
+  }
+  if (reservedLimit !== baseline.reservedLimit) {
+    changes.reservedLimit = reservedLimit
+    expected.reservedLimit = baseline.reservedLimit
+  }
+  if (keyAction !== 'keep') {
+    changes.keyAction = keyAction
+    expected.keyVersion = baseline.keyVersion
+  }
+  if (keyAction === 'replace') changes.key = key
+  return Object.keys(changes).length ? { ...changes, expected } : null
 }
 
 export function seriesRuns(values: (number | null)[]) {

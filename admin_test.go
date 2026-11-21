@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 		t.Fatalf("configured timezone missing: %s", res.Body)
 	}
 
-	const config = `{"publicLimit":25,"reservedLimit":10,"keyAction":"replace","key":"next"}`
+	const config = `{"publicLimit":25,"reservedLimit":10,"keyAction":"replace","key":"next","expected":{"publicLimit":100,"reservedLimit":50,"keyVersion":0}}`
 	if res := request("PUT", "/api/admin/config", "https://other.test", config, cookie); res.Code != 403 {
 		t.Fatalf("cross-origin config: %d", res.Code)
 	}
@@ -112,7 +113,11 @@ func TestAdminLimitsApplyWithoutResettingUsage(t *testing.T) {
 		t.Fatal("charge rejected")
 	}
 	a := newAdmin("ops", "password", cfg, h, ledger)
-	if err := a.update(configUpdate{PublicLimit: new(int64), ReservedLimit: new(int64), KeyAction: "clear"}); err != nil {
+	public, reserved := cfg.limits()
+	if err := a.update(configUpdate{
+		PublicLimit: new(int64), ReservedLimit: new(int64), KeyAction: "clear",
+		Expected: &configExpected{PublicLimit: &public, ReservedLimit: &reserved, KeyVersion: new(uint64)},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if ledger.charge(1, true) || ledger.view(7).Public.Used != 50 || h.hasKey {
@@ -187,5 +192,153 @@ func TestAdminRetainsHistoryWhenTURNDisabled(t *testing.T) {
 	if view.TurnEnabled || view.LedgerFailed || yesterday.Public == nil || *yesterday.Public != 100 ||
 		yesterday.Reserved == nil || *yesterday.Reserved != 50 || today.Public != nil || today.Reserved != nil {
 		t.Fatalf("unexpected archived data with TURN disabled: %+v", view)
+	}
+}
+
+func TestAdminFieldUpdatesConflictOnlyOnTouchedFields(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := openAdminSettings(dir, 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := openLedger(filepath.Join(dir, "usage.json"), 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHub(nil, nil, nil, "old")
+	a := newAdmin("ops", "password", cfg, h, ledger)
+	a.sessions["test"] = time.Now().Add(time.Hour)
+	mux := http.NewServeMux()
+	a.register(mux)
+
+	for _, tc := range []struct {
+		method, body string
+		status       int
+	}{
+		{"PATCH", `{"publicLimit":80,"expected":{"publicLimit":100}}`, 204},
+		{"PATCH", `{"reservedLimit":40,"expected":{"reservedLimit":50}}`, 204},
+		{"PATCH", `{"keyAction":"replace","key":"next","expected":{"keyVersion":0}}`, 204},
+		{"PATCH", `{"keyAction":"clear","expected":{"keyVersion":0}}`, 409},
+		{"PATCH", `{"publicLimit":10,"reservedLimit":20,"expected":{"publicLimit":80,"reservedLimit":50}}`, 409},
+		{"PATCH", `{"publicLimit":10}`, 400},
+		{"PATCH", `{"publicLimit":10,"expected":{}}`, 400},
+		{"PATCH", `{"expected":{}}`, 400},
+		{"PUT", `{"publicLimit":100,"reservedLimit":50,"keyAction":"clear"}`, 409},
+		{"PUT", `{"publicLimit":100,"reservedLimit":50,"keyAction":"keep","expected":{"publicLimit":80,"reservedLimit":40}}`, 400},
+		{"PUT", `{"publicLimit":100,"reservedLimit":50,"keyAction":"keep","expected":{"publicLimit":80,"reservedLimit":40,"keyVersion":0}}`, 409},
+		{"PUT", `{"publicLimit":70,"reservedLimit":30,"keyAction":"keep","expected":{"publicLimit":80,"reservedLimit":40,"keyVersion":1}}`, 204},
+	} {
+		r := httptest.NewRequest(tc.method, "https://transfer.test/api/admin/config", strings.NewReader(tc.body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "https://transfer.test")
+		r.AddCookie(&http.Cookie{Name: adminCookie, Value: "test"})
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: got %d, want %d (%s)", tc.method, tc.body, w.Code, tc.status, w.Body)
+		}
+		if tc.method == "PUT" && tc.status == 409 && !strings.Contains(w.Body.String(), "刷新") {
+			t.Errorf("stale full update did not instruct the user to refresh: %s", w.Body)
+		}
+	}
+
+	loaded, err := openAdminSettings(dir, 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, reserved := loaded.limits()
+	if public != 70 || reserved != 30 || !h.hasKey || h.keyGeneration != 1 {
+		t.Fatalf("unexpected settings: public=%d reserved=%d keyConfigured=%v keyVersion=%d", public, reserved, h.hasKey, h.keyGeneration)
+	}
+	w := httptest.NewRecorder()
+	a.dashboard(w, httptest.NewRequest("GET", "https://transfer.test/api/admin/dashboard", nil))
+	if !strings.Contains(w.Body.String(), `"keyVersion":1`) {
+		t.Fatalf("dashboard omitted the current key version: %s", w.Body)
+	}
+}
+
+func TestAdminDashboardDoesNotHoldHubWhileReadingLedger(t *testing.T) {
+	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	ledger, err := openLedger(filepath.Join(t.TempDir(), "usage.json"), 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.now = func() time.Time {
+		close(entered)
+		<-resume
+		return time.Now()
+	}
+	h := newHub(nil, nil, nil, "")
+	cfg, err := openAdminSettings(t.TempDir(), 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newAdmin("ops", "password", cfg, h, ledger)
+	go func() {
+		defer close(done)
+		a.dashboard(httptest.NewRecorder(), httptest.NewRequest("GET", "https://transfer.test/api/admin/dashboard", nil))
+	}()
+	<-entered
+	if h.mu.TryLock() {
+		h.mu.Unlock()
+	} else {
+		t.Error("hub is locked during the dashboard ledger read")
+	}
+	close(resume)
+	<-done
+}
+
+func TestAdminSettingsKeepHubAvailableAndFailClosedOnUncertainSave(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := openAdminSettings(dir, 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := openLedger(filepath.Join(dir, "usage.json"), 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHub(nil, nil, nil, "old")
+	a := newAdmin("ops", "password", cfg, h, ledger)
+	entered, resume := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	a.persistSettings = func(path string, value any) error {
+		close(entered)
+		<-resume
+		if err := persistJSON(path, value); err != nil {
+			return err
+		}
+		return replacedFileError{errors.New("directory sync failed")}
+	}
+	limit := int64(80)
+	public, _ := cfg.limits()
+	input := configUpdate{
+		PublicLimit: &limit, KeyAction: "clear",
+		Expected: &configExpected{PublicLimit: &public, KeyVersion: new(uint64)},
+	}
+	go func() { done <- a.update(input) }()
+	<-entered
+	if h.mu.TryLock() {
+		if !h.hasKey || ledger.remaining(true) != 150 {
+			t.Error("unconfirmed settings were published")
+		}
+		h.mu.Unlock()
+	} else {
+		t.Error("hub blocked during settings persistence")
+	}
+	close(resume)
+	if err := <-done; err == nil {
+		t.Fatal("expected persistence error")
+	}
+	if !h.hasKey || ledger.remaining(true) != 0 || !ledger.view(7).LedgerFailed || ledger.charge(1, true) {
+		t.Fatal("uncertain settings changed the key or left quota available")
+	}
+
+	a.persistSettings = persistJSON
+	if err := a.update(input); err != nil {
+		t.Fatal(err)
+	}
+	if h.hasKey || ledger.remaining(true) != 130 || ledger.view(7).LedgerFailed {
+		t.Fatal("confirmed retry did not publish settings or restore quota")
 	}
 }

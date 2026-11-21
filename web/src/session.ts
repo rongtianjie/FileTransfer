@@ -1,4 +1,4 @@
-import { MAX_FILE, Transfer } from './transfer.ts'
+import { MAX_FILE, Transfer, type RelaySwitch } from './transfer.ts'
 
 type Epoch = number | string
 type Mode = 'direct' | 'relay'
@@ -18,9 +18,19 @@ type ServerMessage = Start
   | { type: 'failed'; epoch: Epoch; mode: Mode; message?: string; reason?: string }
   | { type: 'closed' | 'error'; message?: string; reason?: string }
 
+type Transition =
+  | { type: 'retry' }
+  | { type: 'relay'; key?: string }
+  | { type: 'relay_upgrade'; key: string; epoch: Epoch }
+
+type Upgrade =
+  | { phase: 'preparing'; id: number; key: string; timer: ReturnType<typeof setTimeout> }
+  | { phase: 'submitted' | 'reserved'; id: number }
+
 type Attempt = {
   epoch: Epoch; mode: Mode; pc: RTCPeerConnection; channel?: RTCDataChannel
   timer?: ReturnType<typeof setTimeout>; pathCheck?: ReturnType<typeof setInterval>
+  upgrade?: Upgrade
   signaling: Promise<void>; candidates: RTCIceCandidateInit[]; ready: boolean; checking: boolean
 }
 
@@ -72,11 +82,15 @@ export class Session {
   authorized = false
   upgradeBytes?: number
   retryFile?: File
+  unconfirmedSave?: { name: string; message: string }
+  detachedSave?: { name: string; saved: boolean }
   transfer?: Transfer
 
   private socket?: WebSocket
   private token?: string
   private attempt?: Attempt
+  private nextUpgrade = 1
+  private finishingSave?: Transfer
   private lastEpoch?: Epoch
   private changed: () => void
 
@@ -148,8 +162,36 @@ export class Session {
 
   relay(key?: string) {
     if (this.role !== 'host' || !this.relayAvailable || this.busy) return
-    if (this.phase !== 'failed' && !(this.canUpgrade && key)) return
-    this.transition({ type: 'relay', ...(key && { key }) })
+    if (this.phase === 'failed') {
+      this.transition({ type: 'relay', ...(key && { key }) })
+      return
+    }
+    const { attempt, transfer } = this
+    if (!key || !this.canUpgrade || !attempt?.ready || !transfer?.canOffer) return
+    const id = this.nextUpgrade++
+    const timer = setTimeout(() => {
+      if (this.attempt !== attempt || attempt.upgrade?.phase !== 'preparing' || attempt.upgrade.id !== id) return
+      this.releaseUpgrade(attempt, '未收到对方的切换确认。若对方仍使用旧页面，请在空闲时刷新后重新加入。')
+    }, 8_000)
+    attempt.upgrade = { phase: 'preparing', id, key, timer }
+    this.busy = true
+    this.message = '正在等待对方确认可以切换中继。'
+    if (transfer.sendRelaySwitch({ type: 'relay-prepare', id })) this.changed()
+    else this.releaseUpgrade(attempt, '无法联系对方确认切换，请稍后重试。', false)
+  }
+
+  askForUpgrade() {
+    if (this.role !== 'guest' || !this.canUpgrade || !this.transfer?.requestUpgrade()) return
+    this.message = '已提醒房主输入中继密钥。'
+    this.changed()
+  }
+
+  get switchingRelay() {
+    return this.attempt?.upgrade !== undefined
+  }
+
+  get savingAfterDisconnect() {
+    return this.finishingSave !== undefined
   }
 
   get canUpgrade() {
@@ -157,19 +199,78 @@ export class Session {
       this.upgradeBytes !== undefined && this.relayAvailable && this.keyAvailable
   }
 
-  private transition(message: { type: string; key?: string }) {
+  private receiveUpgrade(attempt: Attempt, msg: RelaySwitch) {
+    if (this.attempt !== attempt || attempt.mode !== 'relay' || !this.transfer) return
+    const { upgrade } = attempt
+    if (this.role === 'guest') {
+      if (msg.type === 'relay-prepare') {
+        if (upgrade || !attempt.ready || !this.transfer.canOffer) {
+          this.transfer.sendRelaySwitch({ type: 'relay-busy', id: msg.id })
+          return
+        }
+        attempt.upgrade = { phase: 'reserved', id: msg.id }
+        if (!this.transfer.sendRelaySwitch({ type: 'relay-ready', id: msg.id })) attempt.upgrade = undefined
+        this.changed()
+      } else if (msg.type === 'relay-release' && upgrade?.id === msg.id) {
+        attempt.upgrade = undefined
+        this.changed()
+      }
+    } else if (upgrade?.phase === 'preparing' && upgrade.id === msg.id) {
+      if (msg.type === 'relay-busy' || (msg.type === 'relay-ready' && this.transfer.inProgress)) {
+        this.releaseUpgrade(attempt, '对方正在处理文件，请在传输结束后重试。')
+      } else if (msg.type === 'relay-ready') {
+        if (!this.canUpgrade) {
+          this.releaseUpgrade(attempt, '当前无需切换中继额度。')
+          return
+        }
+        clearTimeout(upgrade.timer)
+        attempt.upgrade = { phase: 'submitted', id: msg.id }
+        this.transition({ type: 'relay_upgrade', key: upgrade.key, epoch: attempt.epoch })
+      }
+    }
+  }
+
+  private releaseUpgrade(attempt: Attempt, message: string, notify = true) {
+    const { upgrade } = attempt
+    if (!upgrade) return
+    if (upgrade.phase === 'preparing') clearTimeout(upgrade.timer)
+    if (notify && !this.transfer?.sendRelaySwitch({ type: 'relay-release', id: upgrade.id })) {
+      // Keep both peers reserved until channel closure tears down the attempt.
+      attempt.channel?.close()
+      return
+    }
+    attempt.upgrade = undefined
+    this.busy = false
+    this.message = message
+    this.changed()
+  }
+
+  private transition(message: Transition) {
     this.busy = true
     this.message = '正在等待新的连接配置。'
-    this.send(message)
+    if (!this.send(message)) {
+      const unavailable = '会话服务不可用，请稍后重试。'
+      if (this.attempt?.upgrade?.phase === 'submitted') {
+        this.releaseUpgrade(this.attempt, unavailable)
+        return
+      }
+      this.busy = false
+      this.message = unavailable
+    }
     this.changed()
   }
 
   private send(message: { type: string; [key: string]: unknown }) {
-    if (this.socket?.readyState !== WebSocket.OPEN) return
-    if (message.type === 'create' || message.type === 'join') {
-      this.socket.send(JSON.stringify(message))
-    } else if (this.token) {
-      this.socket.send(JSON.stringify({ ...message, token: this.token }))
+    if (this.socket?.readyState !== WebSocket.OPEN) return false
+    try {
+      if (message.type === 'create' || message.type === 'join') {
+        this.socket.send(JSON.stringify(message))
+      } else if (this.token) {
+        this.socket.send(JSON.stringify({ ...message, token: this.token }))
+      } else return false
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -187,9 +288,14 @@ export class Session {
         this.expiresAt = msg.expiresAt
       }
     } else if (msg.type === 'error') {
-      this.busy = false
+      const message = (msg.reason && messages[msg.reason]) || msg.message || '会话操作失败，请重试。'
+      if (this.attempt?.upgrade?.phase === 'submitted') {
+        this.releaseUpgrade(this.attempt, message)
+        return
+      }
+      if (this.attempt?.upgrade?.phase !== 'preparing') this.busy = false
       if (this.phase === 'idle') this.role = undefined
-      this.message = (msg.reason && messages[msg.reason]) || msg.message || '会话操作失败，请重试。'
+      this.message = message
     } else if (this.token) {
       if (msg.type === 'closed') {
         this.reset(msg.message || '房间已关闭。')
@@ -302,16 +408,30 @@ export class Session {
   private bind(attempt: Attempt, channel: RTCDataChannel) {
     attempt.channel = channel
     // Install the receiver before either side sends application messages.
-    this.transfer = new Transfer(channel, this.role === 'host', () => {
-      this.retryFile = this.transfer?.retryFile
+    const transfer: Transfer = new Transfer(channel, this.role === 'host', () => {
+      if (this.transfer === transfer) {
+        this.retryFile = transfer.retryFile
+        if (transfer.view.phase === 'unconfirmed') {
+          this.unconfirmedSave = { name: transfer.view.name, message: transfer.view.message }
+        }
+      }
+      if (this.finishingSave === transfer && transfer.view.phase !== 'saving') {
+        this.finishingSave = undefined
+        this.detachedSave = { name: transfer.view.name, saved: transfer.view.phase === 'done' }
+      }
       this.changed()
     }, () => this.mode === 'relay' ? this.remaining : undefined, bytes => {
       if (this.mode !== 'relay' || this.remaining === undefined || bytes > MAX_FILE) return
       // The peer can have a newer balance update. Its explicit request also opens the key form.
       this.upgradeBytes = Math.max(this.upgradeBytes ?? 0, bytes)
       this.changed()
-    })
-    this.transfer.retryFile = this.retryFile
+    }, incoming => {
+      if (this.finishingSave || channel.readyState !== 'open' || (!incoming && !attempt.ready)) return false
+      // A guest offer sent before it sees the reservation gets to proceed.
+      return !attempt.upgrade || (incoming && attempt.upgrade.phase === 'preparing')
+    }, msg => this.receiveUpgrade(attempt, msg))
+    this.transfer = transfer
+    transfer.retryFile = this.retryFile
     channel.onopen = () => this.connectionChanged(attempt)
     channel.onclose = channel.onerror = () => this.fail(attempt, '设备之间的数据连接已断开。')
     if (attempt.mode === 'relay') attempt.pathCheck = setInterval(() => void this.checkPath(attempt), 500)
@@ -369,10 +489,13 @@ export class Session {
   private closeAttempt() {
     const attempt = this.attempt
     this.attempt = undefined
+    if (this.transfer?.view.phase === 'saving') this.finishingSave = this.transfer
+    if (this.transfer?.unreportedSave) this.detachedSave = this.transfer.unreportedSave
     this.transfer?.dispose()
     this.transfer = undefined
     if (!attempt) return
     clearTimeout(attempt.timer)
+    if (attempt.upgrade?.phase === 'preparing') clearTimeout(attempt.upgrade.timer)
     clearInterval(attempt.pathCheck)
     attempt.channel?.close()
     attempt.pc.close()
@@ -393,6 +516,7 @@ export class Session {
     this.authorized = false
     this.upgradeBytes = undefined
     this.retryFile = undefined
+    // Save outcomes belong to the page and can arrive after the room closes.
     this.message = message
   }
 }

@@ -127,13 +127,14 @@ h2 { font-weight: 650; font-size: 1.26rem; line-height: 1.4; }
 h1 { font-size: clamp(2.6rem, 7vw, 4.75rem); line-height: 1.12; font-weight: 750; letter-spacing: -.065em; }
 .subtitle { color: var(--muted); font-size: 1rem; margin-top: .95rem; }
 
-.console { background: var(--card-bg); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-md); overflow: hidden; }
+.console { background: var(--card-bg); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-md); }
 .route {
   display: grid;
   grid-template-columns: 4.25rem minmax(0, 1fr) 4.25rem;
   gap: 0;
   align-items: start;
   padding: 1.5rem clamp(1rem, 8vw, 5rem) 1rem;
+  border-radius: 15px 15px 0 0;
   background-color: var(--well);
   background-image: radial-gradient(var(--dot-grid) 1px, transparent 1px);
   background-size: 13px 13px;
@@ -146,14 +147,14 @@ h1 { font-size: clamp(2.6rem, 7vw, 4.75rem); line-height: 1.12; font-weight: 750
 .terminal::after { content: ""; position: absolute; width: 9px; height: 1px; background: currentColor; top: calc(50% + 9px); }
 .path { height: 2.5rem; display: grid; place-items: center; position: relative; }
 .path::before { content: ""; border-top: 2px dashed var(--muted); inset: 50% 0 auto; position: absolute; opacity: .7; }
-.path span { position: relative; background: var(--card-bg); border: 1px solid var(--line); border-radius: 5px; padding: .25rem .75rem; font-size: .78rem; font-weight: 650; text-align: center; }
+.path > .tip-trigger { position: relative; background: var(--card-bg); border: 1px solid var(--line); border-radius: 5px; padding: .25rem .75rem; font-size: .78rem; font-weight: 650; text-align: center; }
 .route[data-phase="connected"] { color: var(--accent); }
 .route[data-phase="connected"] .path::before { border-top: 2px solid currentColor; opacity: 1; }
-.route[data-phase="connected"] .terminal, .route[data-phase="connected"] .path span { border-color: var(--accent); }
+.route[data-phase="connected"] .terminal, .route[data-phase="connected"] .path > .tip-trigger { border-color: var(--accent); }
 .route[data-phase="connected"][data-mode="relay"] { color: #8e62d4; }
 .route[data-phase="connected"][data-mode="relay"] .path::before { border-top: 3px double currentColor; opacity: 1; }
 .route[data-phase="failed"] { color: #d6454d; }
-.route[data-phase="failed"] .path span { color: #d6454d; background: var(--well); border-color: #d6454d80; }
+.route[data-phase="failed"] .path > .tip-trigger { color: #d6454d; background: var(--well); border-color: #d6454d80; }
 
 .workspace { padding: clamp(1.12rem, 4vw, 2rem); }
 .actions { display: grid; grid-template-columns: 1fr 1fr; }
@@ -223,6 +224,9 @@ footer {
 footer > * + * { border-left: 1px solid var(--line); padding-left: 1rem; }
 
 .room-header, .room-status, .transfer-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .55rem 1rem; }
+.copy-feedback:not(:empty) { margin-top: .5rem; text-align: end; }
+.save-notice p { min-width: 0; }
+.save-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .35rem; }
 .room-header { border-bottom: 1px solid var(--line); padding-bottom: .6rem; }
 .room-status { margin: 1rem 0 .5rem; }
 .code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 1.15rem; margin-left: .35rem; overflow-wrap: anywhere; user-select: all; color: var(--accent); }
@@ -259,7 +263,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
   position: absolute;
   bottom: calc(100% + 8px);
   left: 50%;
-  transform: translateX(-50%) translateY(4px);
+  transform: translateX(calc(-50% + var(--tip-shift, 0px))) translateY(4px);
   padding: .48rem .72rem;
   background: var(--tooltip-bg);
   color: var(--tooltip-text);
@@ -283,15 +287,20 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
   content: "";
   position: absolute;
   top: 100%;
-  left: 50%;
+  left: calc(50% - var(--tip-shift, 0px));
   transform: translateX(-50%);
   border: 5px solid transparent;
   border-top-color: var(--tooltip-bg);
 }
+.tip-bubble::before {
+  content: "";
+  position: absolute;
+  inset: 100% 0 auto;
+  height: 8px;
+}
 .top .tip-bubble {
   bottom: auto;
   top: calc(100% + 8px);
-  transform: translateX(-50%) translateY(-4px);
 }
 .top .tip-bubble::after {
   top: auto;
@@ -299,13 +308,16 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
   border-top-color: transparent;
   border-bottom-color: var(--tooltip-bg);
 }
-.top .tip-trigger:hover .tip-bubble,
-.top .tip-trigger:focus-within .tip-bubble,
-.top .tip-trigger:focus-visible .tip-bubble {
-  transform: translateX(-50%) translateY(0);
+.top .tip-bubble::before { inset: auto 0 100%; }
+.tip-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
-.route .tip-bubble {
-  bottom: calc(100% + 12px);
+.tip-trigger:not([data-tip-dismissed]):is(:hover, :focus) > .tip-bubble {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(calc(-50% + var(--tip-shift, 0px)));
 }
 .help-icon {
   display: inline-flex;

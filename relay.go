@@ -135,6 +135,11 @@ func relayLive(grant *relayGrant) bool {
 }
 
 func (r *relayRouter) status(account *relayAccount, grant *relayGrant, authorized bool) (int64, string) {
+	remaining, reason, _ := r.statusWithDrain(account, grant, authorized)
+	return remaining, reason
+}
+
+func (r *relayRouter) statusWithDrain(account *relayAccount, grant *relayGrant, authorized bool) (int64, string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	remaining, available := r.ledger.balance(authorized)
@@ -143,26 +148,26 @@ func (r *relayRouter) status(account *relayAccount, grant *relayGrant, authorize
 	}
 	if grant != nil {
 		if !time.Now().Before(grant.expires) {
-			return remaining, "relay_expired"
+			return remaining, "relay_expired", false
 		}
 		// Publishing a terminal quota reason makes signaling revoke the grant.
 		if !grant.revoked && grant.queued > 0 && (grant.reason == "session_quota" || grant.reason == "global_quota") {
-			return remaining, ""
+			return remaining, "", true
 		}
 	}
 	if !available {
-		return 0, "ledger_unavailable"
+		return 0, "ledger_unavailable", false
 	}
 	if grant != nil {
-		return remaining, grant.reason
+		return remaining, grant.reason, false
 	}
 	if !authorized && account.used >= account.limit {
-		return 0, "session_quota"
+		return 0, "session_quota", false
 	}
 	if remaining <= 0 {
-		return 0, "global_quota"
+		return 0, "global_quota", false
 	}
-	return remaining, ""
+	return remaining, "", false
 }
 
 func (r *relayRouter) auth(request *turn.RequestAttributes) (string, []byte, bool) {

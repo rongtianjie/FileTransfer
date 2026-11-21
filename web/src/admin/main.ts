@@ -1,5 +1,8 @@
 import './style.css'
-import { adminLogin, AdminError, adminRequest, configPayload, type Dashboard, type HistoryDay, type KeyAction, type Quota } from './model.ts'
+import {
+  adminLogin, AdminError, adminRequest, cancelTimeZonePayload, configPayload,
+  type ConfigBaseline, type Dashboard, type HistoryDay, type KeyAction, type Quota, type TimeZoneCancellation,
+} from './model.ts'
 import { chartGeometry, drawTraffic, exactBytes, formatBytes } from './traffic.ts'
 
 function element<T extends HTMLElement = HTMLElement>(id: string) {
@@ -16,11 +19,13 @@ type Days = 7 | 30 | 90
 let days: Days = 30
 let history: HistoryDay[] = []
 let busy = false
-let configDirty = false
+let configBaseline: ConfigBaseline | undefined
+let scheduledCancellation: TimeZoneCancellation | null = null
 const failureLabels = new Map([
   ['connection_failed', '设备连接失败'],
   ['session_quota', '免密中继额度耗尽'],
   ['global_quota', '每日中继额度耗尽'],
+  ['ledger_unavailable', '中继流量账本不可用'],
   ['relay_expired', '中继授权过期'],
 ])
 
@@ -47,16 +52,18 @@ const reservedLimit = element<HTMLInputElement>('reserved-limit')
 const keyAction = element<HTMLSelectElement>('key-action')
 const keyInput = element<HTMLInputElement>('new-key')
 const settingsStatus = element('settings-status')
+const reloadSettings = element<HTMLButtonElement>('reload-settings')
 const settlementStatus = element('settlement-status')
 const useBrowserZone = element<HTMLButtonElement>('use-browser-zone')
 const useShanghaiZone = element<HTMLButtonElement>('use-shanghai-zone')
+const cancelZone = element<HTMLButtonElement>('cancel-zone')
 const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 const shanghaiZone = 'Asia/Shanghai'
 
 async function run(action: () => Promise<void>) {
   if (busy) return
   busy = true
-  const buttons = [retry, refresh, logout, ...rangeButtons, element('login-submit'), element('save'), useBrowserZone, useShanghaiZone]
+  const buttons = [retry, refresh, logout, ...rangeButtons, element('login-submit'), element('save'), reloadSettings, useBrowserZone, useShanghaiZone, cancelZone]
   buttons.forEach(button => button.setAttribute('aria-disabled', 'true'))
   try {
     await action()
@@ -83,8 +90,10 @@ function showLogin(notice = '') {
   days = 30
   history = []
   dateSelect.replaceChildren()
-  configDirty = false
+  configBaseline = undefined
+  scheduledCancellation = null
   settingsForm.reset()
+  reloadSettings.hidden = true
   settingsStatus.textContent = ''
   settlementStatus.textContent = ''
   historyStatus.textContent = ''
@@ -156,10 +165,19 @@ function renderDashboard(data: Dashboard) {
   element('no-failures').hidden = failures.length > 0
 
   element('key-state').textContent = data.keyConfigured ? '密钥已设置' : '尚未设置密钥'
-  if (!configDirty) {
-    publicLimit.value = String(data.public.limit)
-    reservedLimit.value = String(data.reserved.limit)
+  const baseline = configBaseline ?? {
+    publicLimit: data.public.limit, reservedLimit: data.reserved.limit, keyVersion: data.keyVersion,
   }
+  if (!configBaseline || publicLimit.value === String(baseline.publicLimit)) {
+    publicLimit.value = String(data.public.limit)
+    baseline.publicLimit = data.public.limit
+  }
+  if (!configBaseline || reservedLimit.value === String(baseline.reservedLimit)) {
+    reservedLimit.value = String(data.reserved.limit)
+    baseline.reservedLimit = data.reserved.limit
+  }
+  if (keyAction.value === 'keep') baseline.keyVersion = data.keyVersion
+  configBaseline = baseline
   renderSettlement(data)
   renderHistory(data.history)
 }
@@ -167,26 +185,32 @@ function renderDashboard(data: Dashboard) {
 function renderSettlement(data: Dashboard) {
   const zone = data.timeZone
   const target = data.pendingTimeZone
+  const effectiveAt = data.timeZoneEffectiveAt
   const pending = element('settlement-pending')
-  element('quota-title').textContent = target ? '本期额度' : '今日额度'
+  element('quota-title').textContent = effectiveAt ? '本期额度' : '今日额度'
   element('quota-time-zone').textContent = `按 ${zone} 结算`
   element('settlement-current').textContent = `当前使用 ${zone}，两类额度共享此时区。`
-  pending.hidden = !target
-  if (target && data.timeZoneEffectiveAt) {
-    const instant = new Date(data.timeZoneEffectiveAt)
+  pending.hidden = !effectiveAt
+  scheduledCancellation = cancelTimeZonePayload(data)
+  cancelZone.hidden = !scheduledCancellation
+  if (effectiveAt) {
+    const resetZone = target ?? zone
+    const instant = new Date(effectiveAt)
     let stamp = instant.toISOString()
     try {
       stamp = new Intl.DateTimeFormat('zh-CN', {
-        timeZone: target, dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23',
+        timeZone: resetZone, dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23',
       }).format(instant)
     } catch {
       // A browser can lack a zone identifier supported by the server.
     }
-    pending.textContent = `将于 ${stamp}（${target}）切换，当前额度届时结算。`
+    pending.textContent = target
+      ? `将于 ${stamp}（${target}）切换时区并重置额度。`
+      : `继续使用 ${zone}，本期额度将于 ${stamp}（${zone}）重置。`
   }
-  useBrowserZone.hidden = !browserZone || browserZone === (target ?? zone)
+  useBrowserZone.hidden = !browserZone || browserZone === zone || browserZone === target
   useBrowserZone.textContent = `使用浏览器时区（${browserZone}）`
-  useShanghaiZone.hidden = shanghaiZone === (target ?? zone) || browserZone === shanghaiZone
+  useShanghaiZone.hidden = shanghaiZone === zone || shanghaiZone === target || browserZone === shanghaiZone
 }
 
 function renderHistory(rows: HistoryDay[]) {
@@ -214,8 +238,13 @@ function renderSelection() {
   drawTraffic(chart, history, dateSelect.selectedIndex)
 }
 
-async function loadDashboard(period = days) {
+async function loadDashboard(period = days, discardEdits = false) {
   const data = await adminRequest<Dashboard>(fetch(`/api/admin/dashboard?days=${period}`))
+  if (discardEdits) {
+    configBaseline = undefined
+    resetKey()
+    reloadSettings.hidden = true
+  }
   days = period
   pageStatus.textContent = ''
   retry.hidden = true
@@ -242,7 +271,7 @@ async function openDashboard(focusHeading = false) {
   }
 }
 
-function write(method: 'POST' | 'PUT', endpoint: string, body?: object) {
+function write(method: 'POST' | 'PUT' | 'PATCH', endpoint: string, body?: object) {
   return adminRequest<void>(fetch(`/api/admin/${endpoint}`, {
     method,
     ...(body === undefined ? {} : {
@@ -330,26 +359,44 @@ if (window.matchMedia) {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderSelection)
 }
 
-settingsForm.addEventListener('input', () => { configDirty = true })
 keyAction.addEventListener('change', updateKeyField)
+reloadSettings.addEventListener('click', () => void run(async () => {
+  try {
+    await loadDashboard(days, true)
+    settingsStatus.textContent = '已载入最新设置。'
+    publicLimit.focus()
+  } catch (error) {
+    if (!needsLogin(error)) settingsStatus.textContent = message(error)
+  }
+}))
 settingsForm.addEventListener('submit', event => {
   event.preventDefault()
   void run(async () => {
     const fields = [publicLimit, reservedLimit, keyInput]
     let saved = false
     try {
-      const payload = configPayload(publicLimit.value, reservedLimit.value, keyAction.value as KeyAction, keyInput.value)
+      if (!configBaseline) {
+        settingsStatus.textContent = '请先刷新数据，再编辑设置。'
+        return
+      }
+      const payload = configPayload(publicLimit.value, reservedLimit.value, keyAction.value as KeyAction, keyInput.value, configBaseline)
+      if (!payload) {
+        settingsStatus.textContent = '没有需要保存的更改。'
+        return
+      }
       fields.forEach(field => { field.readOnly = true })
       keyAction.disabled = true
       settingsStatus.textContent = '正在保存设置…'
-      await write('PUT', 'config', payload)
+      await write('PATCH', 'config', payload)
       saved = true
-      configDirty = false
+      configBaseline = undefined
+      reloadSettings.hidden = true
       resetKey()
       await loadDashboard()
       settingsStatus.textContent = '设置已保存。'
     } catch (error) {
       if (!needsLogin(error)) {
+        if (error instanceof AdminError && error.status === 409) reloadSettings.hidden = false
         settingsStatus.textContent = saved ? `设置已保存。刷新数据时出错。 ${message(error)}` : message(error)
       }
     } finally {
@@ -359,12 +406,12 @@ settingsForm.addEventListener('submit', event => {
   })
 })
 
-function saveTimeZone(timeZone: string) {
+function saveTimeZone(update: { timeZone: string } | TimeZoneCancellation) {
   void run(async () => {
     let saved = false
     settlementStatus.textContent = '正在保存时区…'
     try {
-      await write('PUT', 'time-zone', { timeZone })
+      await write('PUT', 'time-zone', update)
       saved = true
       await loadDashboard()
       settlementStatus.textContent = '时区设置已保存。'
@@ -376,6 +423,9 @@ function saveTimeZone(timeZone: string) {
   })
 }
 
-useBrowserZone.addEventListener('click', () => saveTimeZone(browserZone))
-useShanghaiZone.addEventListener('click', () => saveTimeZone(shanghaiZone))
+useBrowserZone.addEventListener('click', () => saveTimeZone({ timeZone: browserZone }))
+useShanghaiZone.addEventListener('click', () => saveTimeZone({ timeZone: shanghaiZone }))
+cancelZone.addEventListener('click', () => {
+  if (scheduledCancellation) saveTimeZone(scheduledCancellation)
+})
 void run(() => openDashboard())

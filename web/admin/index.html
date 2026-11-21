@@ -146,6 +146,7 @@
                 </div>
               </div>
               <button class="primary" id="save">保存设置</button>
+              <button type="button" id="reload-settings" hidden>放弃编辑并重新载入</button>
             </form>
             <p class="notice" id="settings-status" role="status"></p>
             <section class="settlement-settings" aria-labelledby="settlement-title">
@@ -153,7 +154,7 @@
                 <h3 id="settlement-title">结算时区</h3>
                 <span class="tip-trigger" tabindex="0" role="button" aria-label="时区说明">
                   <span class="help-icon" aria-hidden="true">?</span>
-                  <span class="tip-bubble" role="tooltip">每日额度重置与历史统计所采用的时区，调整后将于次日生效。</span>
+                  <span class="tip-bubble" role="tooltip">每日额度和历史统计按此时区结算。安排变更或取消切换时，额度重置时间只会保持或顺延。</span>
                 </span>
               </div>
               <p class="muted" id="settlement-current"></p>
@@ -161,6 +162,7 @@
               <div class="settlement-actions">
                 <button type="button" id="use-browser-zone" hidden>使用浏览器时区</button>
                 <button type="button" id="use-shanghai-zone" hidden>恢复上海时区</button>
+                <button type="button" id="cancel-zone" hidden>取消计划中的切换</button>
               </div>
               <p class="notice" id="settlement-status" role="status"></p>
             </section>

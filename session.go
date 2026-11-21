@@ -226,7 +226,17 @@ func (h *hub) handle(c *sessionClient, input request) {
 		}
 	case "failed":
 		if input.Epoch == r.epoch && !r.failed {
-			h.fail(r, h.failureReason(r))
+			reason := "connection_failed"
+			if r.grant != nil {
+				_, relayReason, draining := h.router.statusWithDrain(&r.account, r.grant, r.authorized)
+				if draining {
+					return
+				}
+				if relayReason != "" {
+					reason = relayReason
+				}
+			}
+			h.fail(r, reason)
 		}
 	case "retry":
 		if c != r.host || !r.failed {
@@ -234,8 +244,8 @@ func (h *hub) handle(c *sessionClient, input request) {
 			return
 		}
 		h.start(r, "direct", [2]iceServer{}, now)
-	case "relay":
-		h.startRelay(c, r, input.Key, now)
+	case "relay", "relay_upgrade":
+		h.startRelay(c, r, input, now)
 	default:
 		c.problem("invalid_action", "无法识别此操作。")
 	}
@@ -433,10 +443,24 @@ func (h *hub) start(r *room, mode string, servers [2]iceServer, now time.Time) {
 	}
 }
 
-func (h *hub) startRelay(c *sessionClient, r *room, key string, now time.Time) {
-	upgrading := r.mode == "relay" && !r.authorized && key != ""
-	if c != r.host || (!r.failed && !upgrading) {
+func (h *hub) startRelay(c *sessionClient, r *room, input request, now time.Time) {
+	if c != r.host {
 		c.problem("relay_requires_confirmation", "直连失败后可由发起方确认加密中继。")
+		return
+	}
+	key := input.Key
+	canUpgrade := !r.failed && r.mode == "relay" && !r.authorized && key != ""
+	if input.Type == "relay_upgrade" {
+		if !canUpgrade || input.Epoch != r.epoch || !r.host.ready || !r.guest.ready {
+			c.problem("relay_upgrade_unavailable", "当前连接无法切换中继额度，请稍后重试。")
+			return
+		}
+	} else if !r.failed {
+		if canUpgrade {
+			c.problem("relay_upgrade_requires_reservation", "请双方刷新页面后，再切换正在使用的中继额度。")
+		} else {
+			c.problem("relay_requires_confirmation", "直连失败后可由发起方确认加密中继。")
+		}
 		return
 	}
 	if h.router == nil || len(h.turnURLs) == 0 {

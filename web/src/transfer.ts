@@ -11,12 +11,15 @@ export interface DiskWriter {
   abort(): Promise<void>
 }
 
-type Phase = 'idle' | 'waiting' | 'offered' | 'picking' | 'sending' | 'receiving' | 'saving' | 'confirming' | 'done' | 'stopped'
+type Phase = 'idle' | 'waiting' | 'offered' | 'picking' | 'sending' | 'receiving' | 'saving' | 'confirming' | 'unconfirmed' | 'done' | 'stopped'
 type View = { phase: Phase; name: string; size: number; bytes: number; sent: number; message: string }
-type Control =
+export type RelaySwitch = { type: 'relay-prepare' | 'relay-ready' | 'relay-busy' | 'relay-release'; id: number }
+type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed'
+
+type Control = RelaySwitch
   | { type: 'offer'; id: number; name: string; size: number }
   | { type: 'accept' | 'finish' | 'complete'; id: number }
-  | { type: 'cancel'; id: number; message: string }
+  | { type: 'cancel'; id: number; reason?: CancelReason; message?: string }
   | { type: 'ack'; id: number; bytes: number }
   | { type: 'upgrade'; bytes: number }
 
@@ -29,12 +32,38 @@ type Incoming = {
 const validSize = (size: unknown): size is number =>
   typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 && size <= MAX_FILE
 
+const insufficientMessage = '当前中继余量不足以传输此文件。'
+const uncertainMessage = '连接已断开，无法确认对方是否已保存文件。请先向对方确认。'
+
+const saveFailureMessage = '保存文件失败，请重新发送。'
+
+function peerCancelMessage({ reason, message }: Extract<Control, { type: 'cancel' }>) {
+  switch (reason) {
+    case 'busy': return '对方正忙，请稍后重试。'
+    case 'quota': return insufficientMessage
+    case 'timeout': return '对方等待超时，可重新发送。'
+    case 'save_failed': return '对方保存文件失败，可重新发送。'
+    case 'cancelled':
+    case 'invalid':
+    case 'failed': return '对方已停止传输，可重新发送。'
+  }
+  // Older tabs sent fixed text. Recognize only known outcomes.
+  switch (message) {
+    case saveFailureMessage: return '对方保存文件失败，可重新发送。'
+    case '已取消传输。':
+    case '收到的文件不完整，可重新发送。':
+    case '写入文件失败，请检查保存位置后重试。':
+    case '传输等待超时，可重新发送。': return '对方已停止传输，可重新发送。'
+  }
+}
+
 const emptyView: View = { phase: 'idle', name: '', bytes: 0, sent: 0, size: 0, message: '' }
 
 export class Transfer {
   view: View = { ...emptyView }
   retryFile?: File
   upgradeBytes?: number
+  unreportedSave?: { name: string; saved: boolean }
   private active?: Outgoing | Incoming
   private nextId: number
   private lastOffer = 0
@@ -47,6 +76,8 @@ export class Transfer {
   private changed: () => void
   private budget: () => number | undefined
   private upgrade: (size: number) => void
+  private available: (incoming: boolean) => boolean
+  private relaySwitch: (message: RelaySwitch) => void
 
   constructor(
     channel: RTCDataChannel,
@@ -54,12 +85,16 @@ export class Transfer {
     changed: () => void,
     budget: () => number | undefined,
     upgrade: (size: number) => void,
+    available: (incoming: boolean) => boolean = () => true,
+    relaySwitch: (message: RelaySwitch) => void = () => {},
   ) {
     this.channel = channel
     this.host = host
     this.changed = changed
     this.budget = budget
     this.upgrade = upgrade
+    this.available = available
+    this.relaySwitch = relaySwitch
     this.nextId = host ? 1 : 2
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = BUFFER / 2
@@ -67,15 +102,23 @@ export class Transfer {
     channel.onmessage = ({ data }) => this.receive(data)
   }
 
+  get inProgress() {
+    return this.active !== undefined
+  }
+
+  get canOffer() {
+    return !this.inProgress && !this.disposed && this.available(false)
+  }
+
   offer(file: File): boolean {
-    if (this.active || this.disposed) return false
+    if (!this.canOffer) return false
     if (!validSize(file.size)) {
       this.update({ ...emptyView, phase: 'stopped', message: '单个文件不能超过 2 GiB。' })
       return false
     }
     this.retryFile = file
     if (this.insufficient(file.size)) {
-      this.update({ ...emptyView, phase: 'stopped', name: file.name, size: file.size, message: '中继余量不足，提升额度后可重发。' })
+      this.update({ ...emptyView, phase: 'stopped', name: file.name, size: file.size, message: insufficientMessage })
       this.markUpgrade(file.size)
       return false
     }
@@ -93,7 +136,12 @@ export class Transfer {
   }
 
   requestUpgrade() {
-    if (this.upgradeBytes !== undefined) this.send({ type: 'upgrade', bytes: this.upgradeBytes })
+    return this.canOffer && this.upgradeBytes !== undefined &&
+      this.sendControl({ type: 'upgrade', bytes: this.upgradeBytes })
+  }
+
+  sendRelaySwitch(message: RelaySwitch) {
+    return this.sendControl(message)
   }
 
   checkBudget() {
@@ -104,7 +152,7 @@ export class Transfer {
     const size = active.direction === 'out' ? active.file.size : active.size
     if (this.insufficient(size)) {
       this.markUpgrade(size)
-      this.stop('中继余量不足，提升额度后可重发。', true)
+      this.stop(insufficientMessage, 'quota')
     }
   }
 
@@ -122,7 +170,7 @@ export class Transfer {
       if (error instanceof DOMException && error.name === 'AbortError') {
         this.update({ phase: 'offered' })
       } else {
-        this.stop('无法打开保存位置，请重新发送后再试。', true)
+        this.stop('无法打开保存位置，请重新发送后再试。', 'failed')
       }
       return
     }
@@ -137,24 +185,25 @@ export class Transfer {
   }
 
   cancel() {
-    if (this.view.phase !== 'saving' && this.view.phase !== 'confirming') this.stop('已取消传输。', true)
+    if (this.view.phase !== 'saving' && this.view.phase !== 'confirming') this.stop('已取消传输。', 'cancelled')
   }
 
   dispose() {
     this.disposed = true
-    this.stop('连接已断开。', false)
+    if (this.view.phase === 'confirming') this.unconfirmed()
+    else if (this.view.phase !== 'saving') this.stop('连接已断开。')
     this.channel.onmessage = null
     this.channel.onbufferedamountlow = null
   }
 
   private update(view: Partial<View>) {
     this.view = { ...this.view, ...view }
-    if (!this.disposed) this.changed()
+    this.changed()
   }
 
   private arm(delay = TIMEOUT) {
     clearTimeout(this.timer)
-    if (this.active) this.timer = setTimeout(() => this.stop('传输等待超时，可重新发送。', true), delay)
+    if (this.active) this.timer = setTimeout(() => this.stop('传输等待超时，可重新发送。', 'timeout'), delay)
   }
 
   private insufficient(bytes: number) {
@@ -167,32 +216,44 @@ export class Transfer {
     this.upgrade(bytes)
   }
 
-  private send(message: Control) {
+  private sendControl(message: Control): boolean {
+    if (this.disposed) return false
     try {
       this.channel.send(JSON.stringify(message))
+      return true
     } catch {
-      this.stop('连接不可用，可重新发送。', false)
+      return false
     }
   }
 
-  private stop(message: string, notify: boolean) {
+  private send(message: Control) {
+    if (this.sendControl(message)) return
+    if (this.view.phase === 'confirming') this.unconfirmed()
+    else this.stop('连接不可用，可重新发送。')
+  }
+
+  private stop(message: string, reason?: CancelReason) {
     const active = this.active
-    if (!active) return
+    if (!active || this.view.phase === 'saving') return
     this.active = undefined
     clearTimeout(this.timer)
-    if (active.direction === 'in' && active.writer && this.view.phase !== 'saving') {
+    if (active.direction === 'in' && active.writer) {
       void active.writer.abort().catch(() => {})
     }
     this.update({ phase: 'stopped', message })
-    if (notify) this.send({ type: 'cancel', id: active.id, message })
+    if (reason) this.sendControl({ type: 'cancel', id: active.id, reason })
   }
 
-  private complete() {
+  private unconfirmed() {
+    this.settle('unconfirmed', uncertainMessage)
+  }
+
+  private settle(phase: 'done' | 'unconfirmed' | 'stopped', message = '') {
     const active = this.active
     if (active?.direction === 'out' && active.file === this.retryFile) this.retryFile = undefined
     this.active = undefined
     clearTimeout(this.timer)
-    this.update({ phase: 'done' })
+    this.update({ phase, message })
   }
 
   private receive(data: unknown) {
@@ -211,6 +272,10 @@ export class Transfer {
       return
     }
     if (!Number.isSafeInteger(msg.id) || msg.id <= 0 || msg.id > 0xffffffff) return
+    if (msg.type === 'relay-prepare' || msg.type === 'relay-ready' || msg.type === 'relay-busy' || msg.type === 'relay-release') {
+      this.relaySwitch(msg)
+      return
+    }
     if (msg.type === 'offer') {
       this.receiveOffer(msg)
       return
@@ -218,12 +283,15 @@ export class Transfer {
     const active = this.active
     if (active?.id !== msg.id) return
     if (msg.type === 'cancel') {
-      if (this.view.phase !== 'saving') this.stop('对方已停止传输，可重新发送。', false)
+      // A known receiver cancellation is terminal. The receiver cannot cancel during close.
+      const message = peerCancelMessage(msg)
+      if (this.view.phase === 'confirming' && !message) return
+      this.stop(message ?? '对方已停止传输，可重新发送。')
     } else if (active.direction === 'out') {
       this.receiveSenderControl(active, msg)
     } else if (msg.type === 'finish' && active.writer && !active.finished) {
       if (active.queued !== active.size) {
-        this.stop('收到的文件不完整，可重新发送。', true)
+        this.stop('收到的文件不完整，可重新发送。', 'invalid')
         return
       }
       active.finished = true
@@ -235,21 +303,25 @@ export class Transfer {
     if (msg.id % 2 === (this.host ? 1 : 0) || msg.id <= this.lastOffer) return
     this.lastOffer = msg.id
     if (!validSize(msg.size) || typeof msg.name !== 'string' || !msg.name || msg.name.length > 1024) {
-      this.send({ type: 'cancel', id: msg.id, message: '文件信息无效。' })
+      this.send({ type: 'cancel', id: msg.id, reason: 'invalid' })
+      return
+    }
+    if (!this.available(true)) {
+      this.sendControl({ type: 'cancel', id: msg.id, reason: 'busy' })
       return
     }
     if (this.active) {
       const simultaneous = this.active.direction === 'out' && !this.active.accepted
       if (!simultaneous || this.host) {
-        this.send({ type: 'cancel', id: msg.id, message: '对方正忙。' })
+        this.sendControl({ type: 'cancel', id: msg.id, reason: 'busy' })
         return
       }
-      this.stop('双方同时发送，本轮先接收发起方的文件。', true)
+      this.stop('双方同时发送，本轮先接收发起方的文件。', 'busy')
     }
     if (this.insufficient(msg.size)) {
       this.markUpgrade(msg.size)
       this.send({ type: 'upgrade', bytes: msg.size })
-      this.send({ type: 'cancel', id: msg.id, message: '中继余量不足。' })
+      this.sendControl({ type: 'cancel', id: msg.id, reason: 'quota' })
       return
     }
     this.active = { direction: 'in', id: msg.id, name: msg.name, size: msg.size, queued: 0, written: 0, writes: Promise.resolve(), finished: false }
@@ -271,7 +343,7 @@ export class Transfer {
       this.arm()
       void this.pump()
     } else if (msg.type === 'complete' && active.finished && active.written === active.file.size) {
-      this.complete()
+      this.settle('done')
     }
   }
 
@@ -296,9 +368,13 @@ export class Transfer {
         active.finished = true
         this.update({ phase: 'confirming' })
         this.send({ type: 'finish', id: active.id })
+        clearTimeout(this.timer)
+        if (this.active === active) {
+          this.timer = setTimeout(() => this.update({ message: '仍在等待对方确认保存。确认前无法开始新的传输。' }), TIMEOUT)
+        }
       }
     } catch {
-      if (this.active === active) this.stop('读取或发送文件失败，可重新发送。', true)
+      if (this.active === active) this.stop('读取或发送文件失败，可重新发送。', 'failed')
     } finally {
       this.pumping = false
       if (this.active !== active) void this.pump()
@@ -307,13 +383,13 @@ export class Transfer {
 
   private receiveChunk(frame: ArrayBuffer) {
     const incoming = this.active
-    if (incoming?.direction !== 'in' || frame.byteLength < HEADER) return
+    if (incoming?.direction !== 'in' || incoming.finished || frame.byteLength < HEADER) return
     if (new DataView(frame).getUint32(0) !== incoming.id) return
     const writer = incoming.writer
     const size = frame.byteLength - HEADER
-    if (!writer || incoming.finished || size < 1 || size !== Math.min(CHUNK, incoming.size - incoming.queued) ||
+    if (!writer || size < 1 || size !== Math.min(CHUNK, incoming.size - incoming.queued) ||
       incoming.queued - incoming.written + size > WINDOW) {
-      this.stop('文件数据超出接收范围，已停止传输。', true)
+      this.stop('文件数据超出接收范围，已停止传输。', 'invalid')
       return
     }
     incoming.queued += size
@@ -327,22 +403,28 @@ export class Transfer {
       this.update({ bytes: incoming.written })
       this.arm()
     }).catch(() => {
-      if (this.active === incoming) this.stop('写入文件失败，请检查保存位置后重试。', true)
+      if (this.active === incoming) this.stop('写入文件失败，请检查保存位置后重试。', 'failed')
     })
   }
 
   private async finish(incoming: Incoming, writer: DiskWriter) {
+    await incoming.writes
+    if (this.active !== incoming) return
+    clearTimeout(this.timer)
+    this.update({ phase: 'saving' })
+    let saved = true
     try {
-      await incoming.writes
-      if (this.active !== incoming) return
-      clearTimeout(this.timer)
-      this.update({ phase: 'saving' })
       await writer.close()
-      if (this.active !== incoming) return
-      this.send({ type: 'complete', id: incoming.id })
-      if (this.active === incoming) this.complete()
     } catch {
-      if (this.active === incoming) this.stop('保存文件失败，请重新发送。', true)
+      saved = false
     }
+    if (this.active !== incoming) return
+    const reported = this.sendControl(saved
+      ? { type: 'complete', id: incoming.id }
+      : { type: 'cancel', id: incoming.id, reason: 'save_failed' })
+    const disconnect = !reported && !this.disposed
+    if (disconnect) this.unreportedSave = { name: incoming.name, saved }
+    this.settle(saved ? 'done' : 'stopped', saved ? '' : saveFailureMessage)
+    if (disconnect) this.channel.close()
   }
 }

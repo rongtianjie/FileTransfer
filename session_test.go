@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -60,7 +63,18 @@ func TestPairRejectsThirdDeviceAndOnlyHostCanStartRelayAfterFailure(t *testing.T
 	if free.Mode != "relay" || free.Remaining != freeRelayBytes || free.ICEServers[0].Username == remote.ICEServers[0].Username {
 		t.Fatalf("unexpected relay configuration: %+v", free)
 	}
+	hub.handle(host, request{Type: "ready", Token: created.Token, Epoch: free.Epoch})
+	hub.handle(guest, request{Type: "ready", Token: joined.Token, Epoch: remote.Epoch})
 	hub.handle(host, request{Type: "relay", Token: created.Token, Key: "test relay key"})
+	if message := expect(t, host, "error"); message.Reason != "relay_upgrade_requires_reservation" {
+		t.Fatalf("legacy request should leave the active relay intact, got %+v", message)
+	}
+	if _, _, ok := router.auth(&turn.RequestAttributes{Username: free.ICEServers[0].Username, Realm: turnRealm}); !ok {
+		t.Fatal("legacy request revoked active relay credentials")
+	}
+	hub.handle(host, request{Type: "relay_upgrade", Token: created.Token, Epoch: directHost.Epoch, Key: "test relay key"})
+	expect(t, host, "error")
+	hub.handle(host, request{Type: "relay_upgrade", Token: created.Token, Epoch: free.Epoch, Key: "test relay key"})
 	paid := expect(t, host, "start")
 	expect(t, guest, "start")
 	if !paid.Authorized || paid.Epoch <= free.Epoch {
@@ -97,8 +111,8 @@ func TestPairRejectsThirdDeviceAndOnlyHostCanStartRelayAfterFailure(t *testing.T
 		t.Fatal(err)
 	}
 	ops := newAdmin("ops", "test", cfg, hub, ledger)
-	public, reserved := int64(500_000_000), int64(500_000_000)
-	if err := ops.update(configUpdate{PublicLimit: &public, ReservedLimit: &reserved, KeyAction: "replace", Key: "rotated"}); err != nil {
+	keyVersion := hub.keyGeneration
+	if err := ops.update(configUpdate{KeyAction: "replace", Key: "rotated", Expected: &configExpected{KeyVersion: &keyVersion}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, ok := router.auth(&turn.RequestAttributes{Username: paid.ICEServers[0].Username, Realm: turnRealm}); !ok {
@@ -120,8 +134,10 @@ func TestPairRejectsThirdDeviceAndOnlyHostCanStartRelayAfterFailure(t *testing.T
 	if reconnect := expect(t, host, "start"); reconnect.Authorized {
 		t.Fatal("a previous authorization survived rotation on reconnect")
 	}
-	expect(t, guest, "start")
-	hub.handle(host, request{Type: "relay", Token: created.Token, Key: "rotated"})
+	freeAgain := expect(t, guest, "start")
+	hub.handle(host, request{Type: "ready", Token: created.Token, Epoch: freeAgain.Epoch})
+	hub.handle(guest, request{Type: "ready", Token: joined.Token, Epoch: freeAgain.Epoch})
+	hub.handle(host, request{Type: "relay_upgrade", Token: created.Token, Epoch: freeAgain.Epoch, Key: "rotated"})
 	if reconnect := expect(t, host, "start"); !reconnect.Authorized {
 		t.Fatal("new key did not authorize relay")
 	}
@@ -202,4 +218,82 @@ func TestSignalingCannotBecomeReadyAfterItsDeadline(t *testing.T) {
 	h.tick(time.Now().Add(failedRoomTTL))
 	expect(t, host, "closed")
 	expect(t, guest, "closed")
+}
+
+func TestBrowserFailureDuringQuotaDrainWaitsForTick(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		daily    int64
+		room     int64
+		writeErr error
+	}{
+		{"session_quota", 100, 2, errSessionQuota},
+		{"global_quota", 2, 100, errGlobalQuota},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			ledger, err := openLedger(filepath.Join(t.TempDir(), "usage.json"), tc.daily, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			router := newRelayRouter(net.IPv4(192, 0, 2, 1), ledger)
+			h := newHub(router, nil, nil, "")
+			host, guest := testClient("host"), testClient("guest")
+			r := &room{
+				host: host, guest: guest, locked: true, epoch: 2, mode: "relay",
+				sessionUntil: testExpiry(), account: relayAccount{limit: tc.room}, remaining: 2,
+			}
+			grant, _, err := router.issue(&r.account, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.grant = grant
+			host.room, host.token, host.ready = r, "host-token", true
+			guest.room, guest.token, guest.ready = r, "guest-token", true
+			h.rooms[r] = struct{}{}
+			src := allocateTestRelay(t, router, grant, true)
+			dst := allocateTestRelay(t, router, grant, false)
+			for _, packet := range []string{"a", "b"} {
+				if _, err := src.WriteTo([]byte(packet), dst.LocalAddr()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := src.WriteTo([]byte("c"), dst.LocalAddr()); !errors.Is(err, tc.writeErr) {
+				t.Fatalf("quota denial = %v, want %v", err, tc.writeErr)
+			}
+
+			read := make(chan error, 1)
+			go func() {
+				_, _, err := dst.ReadFrom(make([]byte, 1))
+				read <- err
+			}()
+			h.handle(host, request{Type: "failed", Token: host.token, Epoch: r.epoch})
+			firstReadErr := <-read
+			if r.failed || r.grant != grant || len(h.failures) != 0 {
+				t.Fatalf("browser failure ended relay while a paid packet was queued: failed=%v, counts=%v", r.failed, h.failures)
+			}
+			if firstReadErr != nil {
+				t.Fatalf("first paid read: %v", firstReadErr)
+			}
+			h.tick(time.Now())
+			for _, client := range []*sessionClient{host, guest} {
+				if message := expect(t, client, "balance"); message.Remaining != 0 {
+					t.Fatalf("balance during drain = %+v", message)
+				}
+			}
+
+			buf := make([]byte, 1)
+			if n, _, err := dst.ReadFrom(buf); n != 1 || buf[0] != 'b' || err != nil {
+				t.Fatalf("final paid read = %q, %v", buf[:n], err)
+			}
+			h.tick(time.Now())
+			for _, client := range []*sessionClient{host, guest} {
+				if message := expect(t, client, "failed"); message.Reason != tc.reason {
+					t.Fatalf("failure after drain = %+v, want %q", message, tc.reason)
+				}
+			}
+			if len(h.failures) != 1 || h.failures[tc.reason] != 1 || r.grant != nil {
+				t.Fatalf("failure accounting after drain = %v, grant still set: %v", h.failures, r.grant != nil)
+			}
+		})
+	}
 }

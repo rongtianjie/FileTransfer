@@ -162,3 +162,95 @@ test('a failed stream close stops both peers and preserves the sender file', asy
   assert.equal(guest.view.phase, 'stopped')
   assert.equal(host.retryFile, file)
 })
+
+test('slow final close keeps both peers reserved past 60 seconds and can still succeed', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { host, guest, left } = pair()
+  t.after(() => { host.dispose(); guest.dispose() })
+  let finishClose
+  const closeGate = new Promise(resolve => { finishClose = resolve })
+  const file = new File([], 'slow.txt')
+  host.offer(file)
+  await until(() => guest.view.phase === 'offered')
+  await guest.accept(async () => ({ close: () => closeGate, async abort() {} }))
+  await until(() => guest.view.phase === 'saving')
+  t.mock.timers.tick(60_000)
+  assert.equal(host.view.phase, 'confirming')
+  assert.match(host.view.message, /仍在等待/)
+  host.retry()
+  assert.equal(host.offer(file), false)
+  assert.equal(guest.offer(file), false)
+  assert.equal(left.sent.some(data => typeof data === 'string' && JSON.parse(data).type === 'cancel'), false)
+  finishClose()
+  await until(() => host.view.phase === 'done')
+  assert.equal(host.view.message, '')
+  assert.equal(host.retryFile, undefined)
+})
+
+test('losing the connection during final confirmation leaves the result unknown and clears automatic retry', async () => {
+  const { host, guest } = pair()
+  let finishClose
+  const closeGate = new Promise(resolve => { finishClose = resolve })
+  host.offer(new File([], 'uncertain.txt'))
+  await until(() => guest.view.phase === 'offered')
+  await guest.accept(async () => ({ close: () => closeGate, async abort() {} }))
+  await until(() => guest.view.phase === 'saving')
+  host.dispose()
+  guest.dispose()
+  try {
+    assert.equal(host.view.phase, 'unconfirmed')
+    assert.equal(host.retryFile, undefined)
+    assert.equal(guest.view.phase, 'saving')
+  } finally {
+    finishClose()
+  }
+  await until(() => guest.view.phase === 'done')
+})
+
+test('a receiver can cancel before finish arrives even if the sender has entered confirmation', async () => {
+  const { host, guest, left, right } = pair()
+  const deliver = left.send
+  let finish
+  left.send = function (data) {
+    if (JSON.parse(data).type === 'finish') finish = data
+    else deliver.call(this, data)
+  }
+  const file = new File([], 'empty.txt')
+  host.offer(file)
+  await until(() => guest.view.phase === 'offered')
+  await guest.accept(async () => ({ async abort() {}, close() { assert.fail('cancelled file was saved') } }))
+  await until(() => host.view.phase === 'confirming')
+  guest.cancel()
+  try {
+    await until(() => host.view.phase === 'stopped')
+  } finally {
+    right.onmessage({ data: finish })
+    host.dispose()
+    guest.dispose()
+  }
+  assert.equal(host.retryFile, file)
+})
+
+test('an older receiver can report a final close failure using the legacy cancel message', async () => {
+  const { host, guest, right } = pair()
+  const send = right.send
+  right.send = function (data) {
+    const message = JSON.parse(data)
+    if (message.type === 'cancel') {
+      data = JSON.stringify({ type: 'cancel', id: message.id, message: '保存文件失败，请重新发送。' })
+    }
+    send.call(this, data)
+  }
+  const file = new File([], 'legacy.txt')
+  host.offer(file)
+  await until(() => guest.view.phase === 'offered')
+  await guest.accept(async () => ({ async close() { throw new Error('disk failure') }, async abort() {} }))
+  try {
+    await until(() => host.view.phase === 'stopped')
+    assert.match(host.view.message, /保存文件失败/)
+    assert.equal(host.retryFile, file)
+  } finally {
+    host.dispose()
+    guest.dispose()
+  }
+})
