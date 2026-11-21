@@ -48,7 +48,7 @@
         <section class="panel quota-panel" aria-labelledby="quota-title">
           <div class="heading">
             <h2 id="quota-title">今日额度</h2>
-            <span class="muted">按 UTC 日结算</span>
+            <span class="muted" id="quota-time-zone"></span>
           </div>
           <div class="quota-grid" id="quotas"></div>
         </section>
@@ -61,7 +61,7 @@
               <button type="button" data-days="90" aria-pressed="false">90 天</button>
             </div>
           </div>
-          <p class="muted">按 UTC 日统计额度消耗，含协议开销和重传。</p>
+          <p class="muted">按结算日期统计额度消耗，含协议开销和重传。</p>
           <p class="notice" id="history-status" role="status"></p>
           <div id="plot" hidden>
             <ul class="legend" aria-label="图例">
@@ -72,7 +72,7 @@
           </div>
           <div class="date-readout" id="date-readout" hidden>
             <div>
-              <label for="history-date">查看日期（UTC）</label>
+              <label for="history-date">查看日期</label>
               <div class="date-controls">
                 <button id="previous-date" type="button" aria-label="前一天">‹</button>
                 <select id="history-date"></select>
@@ -80,6 +80,7 @@
               </div>
             </div>
             <dl class="readings" aria-live="polite">
+              <div id="history-zone-row" hidden><dt>结算时区</dt><dd id="history-zone"></dd></div>
               <div><dt>公共额度用量</dt><dd id="history-public"></dd></div>
               <div><dt>保留额度用量</dt><dd id="history-reserved"></dd></div>
             </dl>
@@ -127,6 +128,16 @@
               <button class="primary" id="save">保存设置</button>
             </form>
             <p class="notice" id="settings-status" role="status"></p>
+            <section class="settlement-settings" aria-labelledby="settlement-title">
+              <h3 id="settlement-title">结算时区</h3>
+              <p class="muted" id="settlement-current"></p>
+              <p class="muted" id="settlement-pending" hidden></p>
+              <div class="settlement-actions">
+                <button type="button" id="use-browser-zone" hidden>使用浏览器时区</button>
+                <button type="button" id="use-shanghai-zone" hidden>恢复上海时区</button>
+              </div>
+              <p class="notice" id="settlement-status" role="status"></p>
+            </section>
           </section>
         </div>
       </div>

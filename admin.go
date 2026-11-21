@@ -11,8 +11,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +70,7 @@ func (a *admin) register(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("GET /api/admin/dashboard", a.guard(true, a.dashboard))
 	mux.HandleFunc("PUT /api/admin/config", a.guard(true, a.configure))
+	mux.HandleFunc("PUT /api/admin/time-zone", a.guard(true, a.configureTimeZone))
 }
 
 func (a *admin) guard(auth bool, next http.HandlerFunc) http.HandlerFunc {
@@ -219,33 +218,10 @@ func (a *admin) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.hub.mu.Lock()
-	view := adminDashboard{KeyConfigured: a.hub.hasKey, TurnEnabled: a.ledger != nil, Rooms: a.hub.stats()}
-	if a.ledger != nil {
-		view.ledgerView = a.ledger.view(days)
-	} else {
-		public, reserved := a.settings.limits()
-		view.Public, view.Reserved = poolUsage{Limit: public}, poolUsage{Limit: reserved}
+	view := adminDashboard{
+		ledgerView: a.ledger.view(days), KeyConfigured: a.hub.hasKey, TurnEnabled: a.hub.router != nil, Rooms: a.hub.stats(),
 	}
 	a.hub.mu.Unlock()
-	if a.ledger == nil {
-		// Disabled TURN leaves the existing ledger alone, including its most
-		// recent recorded day. Days without measurements stay missing.
-		now := a.now()
-		usage, err := readUsage(filepath.Join(filepath.Dir(a.settings.path), "relay-usage.json"))
-		var current *dailyUsage
-		switch {
-		case err == nil:
-			current = &usage.dailyUsage
-			if usage.Day == now.UTC().Format(time.DateOnly) {
-				view.Public.Used = usage.Public
-				view.Reserved.Used = usage.Reserved
-			}
-		case !errors.Is(err, os.ErrNotExist):
-			view.LedgerFailed = true
-			log.Printf("read disabled TURN ledger: %v", err)
-		}
-		view.History = historyWindow(now, days, usage.History, current)
-	}
 	writeAdminJSON(w, http.StatusOK, view)
 }
 
@@ -291,6 +267,26 @@ func (a *admin) configure(w http.ResponseWriter, r *http.Request) {
 	if err := a.update(input); err != nil {
 		log.Printf("persist Admin relay settings: %v", err)
 		adminProblem(w, http.StatusInternalServerError, "中继设置未能确认保存，请检查服务日志和数据卷。")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *admin) configureTimeZone(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		TimeZone string `json:"timeZone"`
+	}
+	if !readAdminJSON(w, r, &input) {
+		return
+	}
+	zone, err := loadSettlementZone(input.TimeZone)
+	if err != nil {
+		adminProblem(w, http.StatusBadRequest, "无法识别浏览器时区。")
+		return
+	}
+	if err := a.ledger.scheduleTimeZone(zone); err != nil {
+		log.Printf("persist settlement time zone: %v", err)
+		adminProblem(w, http.StatusInternalServerError, "时区未能保存，请检查服务日志和数据卷。")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

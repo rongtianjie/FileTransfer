@@ -1,9 +1,12 @@
 export type KeyAction = 'keep' | 'replace' | 'clear'
 export type Quota = { used: number; limit: number; remaining: number }
-export type HistoryDay = { day: string; public: number | null; reserved: number | null }
+export type HistoryDay = { day: string; timeZone?: string; public: number | null; reserved: number | null }
 export type Dashboard = {
   turnEnabled: boolean
   ledgerFailed: boolean
+  timeZone: string
+  pendingTimeZone?: string
+  timeZoneEffectiveAt?: string
   public: Quota
   reserved: Quota
   history: HistoryDay[]

@@ -47,11 +47,16 @@ const reservedLimit = element<HTMLInputElement>('reserved-limit')
 const keyAction = element<HTMLSelectElement>('key-action')
 const keyInput = element<HTMLInputElement>('new-key')
 const settingsStatus = element('settings-status')
+const settlementStatus = element('settlement-status')
+const useBrowserZone = element<HTMLButtonElement>('use-browser-zone')
+const useShanghaiZone = element<HTMLButtonElement>('use-shanghai-zone')
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+const shanghaiZone = 'Asia/Shanghai'
 
 async function run(action: () => Promise<void>) {
   if (busy) return
   busy = true
-  const buttons = [retry, refresh, logout, ...rangeButtons, element('login-submit'), element('save')]
+  const buttons = [retry, refresh, logout, ...rangeButtons, element('login-submit'), element('save'), useBrowserZone, useShanghaiZone]
   buttons.forEach(button => button.setAttribute('aria-disabled', 'true'))
   try {
     await action()
@@ -81,6 +86,7 @@ function showLogin(notice = '') {
   configDirty = false
   settingsForm.reset()
   settingsStatus.textContent = ''
+  settlementStatus.textContent = ''
   historyStatus.textContent = ''
   resetKey()
   nav.hidden = true
@@ -154,7 +160,33 @@ function renderDashboard(data: Dashboard) {
     publicLimit.value = String(data.public.limit)
     reservedLimit.value = String(data.reserved.limit)
   }
+  renderSettlement(data)
   renderHistory(data.history)
+}
+
+function renderSettlement(data: Dashboard) {
+  const zone = data.timeZone
+  const target = data.pendingTimeZone
+  const pending = element('settlement-pending')
+  element('quota-title').textContent = target ? '本期额度' : '今日额度'
+  element('quota-time-zone').textContent = `按 ${zone} 结算`
+  element('settlement-current').textContent = `当前使用 ${zone}，两类额度共享此时区。`
+  pending.hidden = !target
+  if (target && data.timeZoneEffectiveAt) {
+    const instant = new Date(data.timeZoneEffectiveAt)
+    let stamp = instant.toISOString()
+    try {
+      stamp = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: target, dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23',
+      }).format(instant)
+    } catch {
+      // A browser can lack a zone identifier supported by the server.
+    }
+    pending.textContent = `将于 ${stamp}（${target}）切换，当前额度届时结算。`
+  }
+  useBrowserZone.hidden = !browserZone || browserZone === (target ?? zone)
+  useBrowserZone.textContent = `使用浏览器时区（${browserZone}）`
+  useShanghaiZone.hidden = shanghaiZone === (target ?? zone) || browserZone === shanghaiZone
 }
 
 function renderHistory(rows: HistoryDay[]) {
@@ -175,6 +207,8 @@ function renderSelection() {
   if (!row) return
   previousDate.setAttribute('aria-disabled', String(dateSelect.selectedIndex === 0))
   nextDate.setAttribute('aria-disabled', String(dateSelect.selectedIndex === history.length - 1))
+  element('history-zone-row').hidden = !row.timeZone
+  element('history-zone').textContent = row.timeZone ?? ''
   element('history-public').textContent = exactBytes(row.public)
   element('history-reserved').textContent = exactBytes(row.reserved)
   drawTraffic(chart, history, dateSelect.selectedIndex)
@@ -322,4 +356,23 @@ settingsForm.addEventListener('submit', event => {
   })
 })
 
+function saveTimeZone(timeZone: string) {
+  void run(async () => {
+    let saved = false
+    settlementStatus.textContent = '正在保存时区…'
+    try {
+      await write('PUT', 'time-zone', { timeZone })
+      saved = true
+      await loadDashboard()
+      settlementStatus.textContent = '时区设置已保存。'
+    } catch (error) {
+      if (!needsLogin(error)) {
+        settlementStatus.textContent = saved ? `时区设置已保存。刷新数据时出错。 ${message(error)}` : message(error)
+      }
+    }
+  })
+}
+
+useBrowserZone.addEventListener('click', () => saveTimeZone(browserZone))
+useShanghaiZone.addEventListener('click', () => saveTimeZone(shanghaiZone))
 void run(() => openDashboard())

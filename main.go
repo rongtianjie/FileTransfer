@@ -92,7 +92,7 @@ func run() error {
 			return errors.New("FILETRANSFER_TURN_HOST must be an IPv4 address or hostname without a port")
 		}
 		publicLimit, reservedLimit := settings.limits()
-		ledger, err = prepareLedger(filepath.Join(dir, "relay-usage.json"), publicLimit, reservedLimit, time.Now)
+		ledger, err = loadSiteLedger(filepath.Join(dir, "relay-usage.json"), publicLimit, reservedLimit, false)
 		if err != nil {
 			return err
 		}
@@ -131,6 +131,13 @@ func run() error {
 			return err
 		}
 		log.Printf("TURN listening on %s", udp.LocalAddr())
+	}
+	if ledger == nil && username != "" {
+		publicLimit, reservedLimit := settings.limits()
+		ledger, err = loadSiteLedger(filepath.Join(dir, "relay-usage.json"), publicLimit, reservedLimit, true)
+		if err != nil {
+			return err
+		}
 	}
 	if list := os.Getenv("FILETRANSFER_STUN_URLS"); list != "" {
 		stunURLs = nil
@@ -188,7 +195,7 @@ func run() error {
 		for {
 			select {
 			case now := <-ticker.C:
-				if ledger != nil {
+				if router != nil {
 					ledger.rollDay()
 				}
 				hub.tick(now)

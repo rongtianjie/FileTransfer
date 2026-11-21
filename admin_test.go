@@ -17,7 +17,11 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 	}
 	h := newHub(nil, nil, nil, "old")
 	mux := http.NewServeMux()
-	a := newAdmin("ops", "strong-password", cfg, h, nil)
+	ledger, err := loadLedger(filepath.Join(t.TempDir(), "relay-usage.json"), 100, 50, time.Now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newAdmin("ops", "strong-password", cfg, h, ledger)
 	a.register(mux)
 	request := func(method, path, origin, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, "https://transfer.test"+path, strings.NewReader(body))
@@ -58,6 +62,23 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 	if res := request("GET", "/api/admin/dashboard?days=7", "", "", cookie); res.Code != 200 || strings.Contains(res.Body.String(), "strong-password") {
 		t.Fatalf("dashboard: %d %s", res.Code, res.Body)
 	}
+	const timeZone = `{"timeZone":"Pacific/Auckland"}`
+	if res := request("PUT", "/api/admin/time-zone", origin, timeZone, nil); res.Code != 401 {
+		t.Fatalf("unauthenticated timezone change: %d", res.Code)
+	}
+	if res := request("PUT", "/api/admin/time-zone", "https://other.test", timeZone, cookie); res.Code != 403 {
+		t.Fatalf("cross-origin timezone change: %d", res.Code)
+	}
+	if res := request("PUT", "/api/admin/time-zone", origin, `{"timeZone":"Local"}`, cookie); res.Code != 400 {
+		t.Fatalf("server-local timezone was accepted: %d", res.Code)
+	}
+	if res := request("PUT", "/api/admin/time-zone", origin, timeZone, cookie); res.Code != 204 {
+		t.Fatalf("timezone save: %d %s", res.Code, res.Body)
+	}
+	if res := request("GET", "/api/admin/dashboard", "", "", cookie); !strings.Contains(res.Body.String(), `"timeZone":"Pacific/Auckland"`) {
+		t.Fatalf("configured timezone missing: %s", res.Body)
+	}
+
 	const config = `{"publicLimit":25,"reservedLimit":10,"keyAction":"replace","key":"next"}`
 	if res := request("PUT", "/api/admin/config", "https://other.test", config, cookie); res.Code != 403 {
 		t.Fatalf("cross-origin config: %d", res.Code)
@@ -151,8 +172,11 @@ func TestAdminRetainsHistoryWhenTURNDisabled(t *testing.T) {
 	if !ledger.charge(115, true) {
 		t.Fatal("authorized traffic rejected")
 	}
-	a := newAdmin("ops", "password", cfg, newHub(nil, nil, nil, ""), nil)
-	a.now = func() time.Time { return day.AddDate(0, 0, 1) }
+	disabled, err := loadLedger(ledger.path, 100, 50, func() time.Time { return day.AddDate(0, 0, 1) }, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newAdmin("ops", "password", cfg, newHub(nil, nil, nil, ""), disabled)
 	w := httptest.NewRecorder()
 	a.dashboard(w, httptest.NewRequest("GET", "https://transfer.test/api/admin/dashboard?days=7", nil))
 	var view adminDashboard

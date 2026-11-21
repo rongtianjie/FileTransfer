@@ -125,7 +125,7 @@ FILETRANSFER_DATA_DIR=/var/lib/filetransfer \
 | `FILETRANSFER_TURN_TLS_ADDR` | 可选 TURN TLS 监听地址，共用站点证书。 |
 | `FILETRANSFER_STUN_URLS` | 可选逗号分隔 STUN 列表。默认用自建 TURN 的 STUN 端口。 |
 | `FILETRANSFER_RELAY_KEY` | 后端校验的中继密钥。留空只允许免密中继。 |
-| `FILETRANSFER_PUBLIC_DAILY_BYTES` | UTC 每日公共转发额度，默认 20,000,000,000 字节。 |
+| `FILETRANSFER_PUBLIC_DAILY_BYTES` | 按站点时区结算的每日公共转发额度，默认 20,000,000,000 字节。 |
 | `FILETRANSFER_RESERVED_DAILY_BYTES` | 密钥用户的额外每日额度，默认 20,000,000,000 字节。 |
 | `FILETRANSFER_DATA_DIR` | 保存中继设置、计量账本和历史的可写持久化目录，默认 `data`。部署时保留该目录。 |
 | `FILETRANSFER_WEB_DIR` | 已构建前端目录，默认 `web/dist`。 |
@@ -133,7 +133,7 @@ FILETRANSFER_DATA_DIR=/var/lib/filetransfer \
 | `FILETRANSFER_ADMIN_PASSWORD_FILE` | 服务进程读取的密码文件路径。Compose 通过 secret 设置此变量。 |
 | `FILETRANSFER_ADMIN_PASSWORD` | 密码文件的替代方式。使用其中一种密码来源。 |
 
-管理员可在首页右上角登录。登录后留在传输首页，点击右上角的「配置」进入 `/admin/`。流量趋势默认显示最近 30 天，历史按 UTC 日保留最近 90 天。已计量且无流量的日期显示为 0，缺少计量记录的日期留空。重启后，每个额度池可能多计不足 256 KiB 的未用预留。替换或清空中继密钥后，已授权的 TURN 分配可继续使用到凭据过期，新连接和凭据续发需要重新授权。
+管理员可在首页右上角登录。登录后留在传输首页，点击右上角的「配置」进入 `/admin/`。流量趋势默认显示最近 30 天，历史按结算日保留最近 90 天。站点默认使用上海时间（`Asia/Shanghai`）。在「配置 → 中继设置 → 结算时区」中可保存管理员浏览器的实际时区，保存后其他浏览器共用该设置。从已有 UTC 账本升级或更改时区时，现有额度持续到新时区首个不早于原定重置时间的日界，历史记录保留各自的计量时区。已计量且无流量的日期显示为 0，缺少计量记录的日期留空。重启后，每个额度池可能多计不足 256 KiB 的未用预留。替换或清空中继密钥后，已授权的 TURN 分配可继续使用到凭据过期，新连接和凭据续发需要重新授权。
 
 普通中继每次配对共享 100,000,000 字节额度，包含双方的 WebRTC 协议开销和重传。接近上限的文件可能提前耗尽额度。密钥用户先用公共额度，再用保留额度。服务以 256 KiB 为单位持久化预留流量额度。中继凭据在连接切换和离开房间时即时撤销，每轮最长有效 45 分钟。
 

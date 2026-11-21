@@ -19,14 +19,18 @@ const (
 
 type dailyUsage struct {
 	Day      string `json:"day"`
+	TimeZone string `json:"timeZone,omitempty"`
 	Public   int64  `json:"public"`
 	Reserved int64  `json:"reserved"`
 }
 
 type usageFile struct {
 	dailyUsage
-	Version int          `json:"version"`
-	History []dailyUsage `json:"history,omitempty"`
+	Version         int          `json:"version"`
+	History         []dailyUsage `json:"history,omitempty"`
+	PendingTimeZone string       `json:"pendingTimeZone,omitempty"`
+	SwitchAt        time.Time    `json:"switchAt,omitzero"`
+	Unobserved      bool         `json:"unobserved,omitempty"`
 }
 
 // Only durable reservations are spendable. After a restart, an unfinished
@@ -35,6 +39,8 @@ type dailyLedger struct {
 	last                        atomic.Pointer[quotaSnapshot]
 	mu                          sync.Mutex
 	path                        string
+	zone, pending               *time.Location
+	inactive                    bool
 	now                         func() time.Time
 	publicLimit, reserveLimit   int64
 	durable                     usageFile
@@ -46,6 +52,8 @@ type dailyLedger struct {
 
 type quotaSnapshot struct {
 	day                       string
+	zone                      *time.Location
+	switchAt                  time.Time
 	public, reserved          int64
 	publicLimit, reserveLimit int64
 	failed                    bool
@@ -59,15 +67,19 @@ type poolUsage struct {
 
 type historyPoint struct {
 	Day      string `json:"day"`
+	TimeZone string `json:"timeZone,omitempty"`
 	Public   *int64 `json:"public"`
 	Reserved *int64 `json:"reserved"`
 }
 
 type ledgerView struct {
-	Public       poolUsage      `json:"public"`
-	Reserved     poolUsage      `json:"reserved"`
-	History      []historyPoint `json:"history"`
-	LedgerFailed bool           `json:"ledgerFailed"`
+	Public              poolUsage      `json:"public"`
+	Reserved            poolUsage      `json:"reserved"`
+	History             []historyPoint `json:"history"`
+	LedgerFailed        bool           `json:"ledgerFailed"`
+	TimeZone            string         `json:"timeZone"`
+	PendingTimeZone     string         `json:"pendingTimeZone,omitempty"`
+	TimeZoneEffectiveAt time.Time      `json:"timeZoneEffectiveAt,omitzero"`
 }
 
 func openLedger(path string, publicLimit, reserveLimit int64) (*dailyLedger, error) {
@@ -86,8 +98,35 @@ func openLedgerWithClock(path string, publicLimit, reserveLimit int64, now func(
 }
 
 func prepareLedger(path string, publicLimit, reserveLimit int64, now func() time.Time) (*dailyLedger, error) {
-	l := &dailyLedger{path: path, publicLimit: publicLimit, reserveLimit: reserveLimit, now: now}
+	return loadLedger(path, publicLimit, reserveLimit, now, false)
+}
+
+func loadLedger(path string, publicLimit, reserveLimit int64, now func() time.Time, inactive bool) (*dailyLedger, error) {
+	return loadLedgerWithDefault(path, publicLimit, reserveLimit, now, inactive, time.UTC)
+}
+
+func loadSiteLedger(path string, publicLimit, reserveLimit int64, inactive bool) (*dailyLedger, error) {
+	zone, err := loadSettlementZone(defaultSettlementZone)
+	if err != nil {
+		return nil, err
+	}
+	ledger, err := loadLedgerWithDefault(path, publicLimit, reserveLimit, time.Now, inactive, zone)
+	if err == nil || !inactive {
+		return ledger, err
+	}
+	log.Printf("read disabled TURN ledger: %v", err)
+	ledger = &dailyLedger{
+		path: path, publicLimit: publicLimit, reserveLimit: reserveLimit, now: time.Now,
+		zone: zone, inactive: true, failed: true, durable: usageFile{Unobserved: true},
+	}
+	ledger.publish()
+	return ledger, nil
+}
+
+func loadLedgerWithDefault(path string, publicLimit, reserveLimit int64, now func() time.Time, inactive bool, defaultZone *time.Location) (*dailyLedger, error) {
+	l := &dailyLedger{path: path, publicLimit: publicLimit, reserveLimit: reserveLimit, now: now, zone: defaultZone, inactive: inactive}
 	usage, err := readUsage(path)
+	legacy := err == nil && usage.Version < 2
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		l.needsWrite = true
@@ -96,8 +135,28 @@ func prepareLedger(path string, publicLimit, reserveLimit int64, now func() time
 	default:
 		l.durable = usage
 		l.needsWrite = usage.Version == 0
+		name := usage.TimeZone
+		if name == "" {
+			name = "UTC"
+		}
+		l.zone, err = loadSettlementZone(name)
+		if err != nil {
+			return nil, err
+		}
+		l.durable.TimeZone = name
+		if usage.PendingTimeZone != "" {
+			l.pending, err = loadSettlementZone(usage.PendingTimeZone)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	l.advanceDay(now())
+	current := now()
+	l.advanceDay(current)
+	if legacy && l.zone.String() != defaultZone.String() {
+		l.durable, l.zone, l.pending = l.planTimeZone(current, defaultZone)
+		l.needsWrite = true
+	}
 	l.publish()
 	return l, nil
 }
@@ -106,6 +165,9 @@ func (l *dailyLedger) activate() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.advanceDay(l.now())
+	if !l.inactive && l.durable.Unobserved {
+		l.durable.Unobserved, l.needsWrite = false, true
+	}
 	ok := l.persistPending()
 	l.publish()
 	if !ok {
@@ -131,8 +193,11 @@ func validateUsage(value usageFile) error {
 		_, err := time.Parse(time.DateOnly, usage.Day)
 		return err == nil && usage.Public >= 0 && usage.Reserved >= 0
 	}
-	if !valid(value.dailyUsage) || value.Version < 0 || value.Version > 1 || len(value.History) >= historyDays {
+	if !valid(value.dailyUsage) || value.Version < 0 || value.Version > 2 || len(value.History) >= historyDays {
 		return errors.New("invalid quota ledger")
+	}
+	if (value.PendingTimeZone == "") != value.SwitchAt.IsZero() {
+		return errors.New("invalid settlement time zone transition")
 	}
 	previous := ""
 	for _, usage := range value.History {
@@ -146,31 +211,52 @@ func validateUsage(value usageFile) error {
 
 // Advance only the observed day. Dates skipped while offline remain missing.
 func (l *dailyLedger) advanceDay(now time.Time) {
-	now = now.UTC()
-	day := now.Format(time.DateOnly)
-	if l.failed || l.durable.Day >= day {
+	if l.failed || !dayDue(now, l.durable.Day, l.zone, l.durable.SwitchAt) {
 		return
 	}
-	cutoff := now.AddDate(0, 0, 1-historyDays).Format(time.DateOnly)
+	prior := l.spent()
+	zone := l.zone
+	if l.pending != nil {
+		zone = l.pending
+	}
+	day := now.In(zone).Format(time.DateOnly)
+	if l.pending != nil {
+		day = max(day, l.durable.SwitchAt.In(zone).Format(time.DateOnly))
+	}
+	cutoff := civilOffset(day, 1-historyDays)
 	history := l.durable.History
 	for len(history) > 0 && history[0].Day < cutoff {
 		history = history[1:]
 	}
-	if l.durable.Day >= cutoff {
-		history = append(history, l.spent())
+	if prior.Day >= cutoff && !l.durable.Unobserved {
+		history = append(history, prior)
 	}
-	l.durable = usageFile{Version: 1, History: history, dailyUsage: dailyUsage{Day: day}}
+	l.durable = usageFile{
+		Version: 2, History: history, Unobserved: l.inactive,
+		dailyUsage: dailyUsage{Day: day, TimeZone: zone.String()},
+	}
+	l.zone, l.pending = zone, nil
 	l.publicCredit, l.reserveCredit = 0, 0
 	l.needsWrite = true
 }
 
+func dayDue(now time.Time, day string, zone *time.Location, switchAt time.Time) bool {
+	if !switchAt.IsZero() {
+		return !now.Before(switchAt)
+	}
+	return day < now.In(zone).Format(time.DateOnly)
+}
+
 func (l *dailyLedger) spent() dailyUsage {
-	return dailyUsage{Day: l.durable.Day, Public: l.durable.Public - l.publicCredit, Reserved: l.durable.Reserved - l.reserveCredit}
+	return dailyUsage{
+		Day: l.durable.Day, TimeZone: l.zone.String(),
+		Public: l.durable.Public - l.publicCredit, Reserved: l.durable.Reserved - l.reserveCredit,
+	}
 }
 
 func (l *dailyLedger) rollDay() {
 	snapshot := l.last.Load()
-	if snapshot.failed || snapshot.day >= l.now().UTC().Format(time.DateOnly) {
+	if snapshot.failed || !dayDue(l.now(), snapshot.day, snapshot.zone, snapshot.switchAt) {
 		return
 	}
 	l.mu.Lock()
@@ -187,7 +273,7 @@ func (l *dailyLedger) remaining(authorized bool) int64 {
 		return 0
 	}
 	public, reserved := current.public, current.reserved
-	if current.day < l.now().UTC().Format(time.DateOnly) {
+	if dayDue(l.now(), current.day, current.zone, current.switchAt) {
 		public, reserved = current.publicLimit, current.reserveLimit
 	}
 	if authorized {
@@ -199,7 +285,7 @@ func (l *dailyLedger) remaining(authorized bool) int64 {
 func (l *dailyLedger) publish() {
 	public, reserved := l.available()
 	l.last.Store(&quotaSnapshot{
-		day: l.durable.Day, public: public, reserved: reserved, failed: l.blocked(),
+		day: l.durable.Day, zone: l.zone, switchAt: l.durable.SwitchAt, public: public, reserved: reserved, failed: l.blocked(),
 		publicLimit: l.publicLimit, reserveLimit: l.reserveLimit,
 	})
 }
@@ -256,7 +342,7 @@ func (l *dailyLedger) persistPending() bool {
 		return false
 	}
 	if l.needsWrite {
-		l.durable.Version = 1
+		l.durable.Version = 2
 		if err := persistJSON(l.path, l.durable); err != nil {
 			l.failed = true
 			log.Printf("TURN quota persistence failed: %v", err)
@@ -281,9 +367,17 @@ func (l *dailyLedger) view(days int) ledgerView {
 	view := ledgerView{
 		Public:       poolUsage{Used: used.Public, Limit: l.publicLimit, Remaining: public},
 		Reserved:     poolUsage{Used: used.Reserved, Limit: l.reserveLimit, Remaining: reserved},
-		LedgerFailed: l.blocked(),
+		LedgerFailed: l.blocked(), TimeZone: l.zone.String(),
+		PendingTimeZone: l.durable.PendingTimeZone, TimeZoneEffectiveAt: l.durable.SwitchAt,
 	}
-	view.History = historyWindow(now, days, l.durable.History, &used)
+	var observed *dailyUsage
+	if !l.durable.Unobserved {
+		observed = &used
+	}
+	view.History = historyWindow(now.In(l.zone), days, l.durable.History, observed)
+	if l.inactive {
+		view.Public.Remaining, view.Reserved.Remaining = 0, 0
+	}
 	return view
 }
 
@@ -297,14 +391,23 @@ func historyWindow(now time.Time, days int, history []dailyUsage, current *daily
 	}
 	points := make([]historyPoint, 0, days)
 	for offset := 1 - days; offset <= 0; offset++ {
-		day := now.UTC().AddDate(0, 0, offset).Format(time.DateOnly)
+		day := civilOffset(now.Format(time.DateOnly), offset)
 		point := historyPoint{Day: day}
 		if usage, ok := known[day]; ok {
 			point.Public, point.Reserved = &usage.Public, &usage.Reserved
+			point.TimeZone = usage.TimeZone
+			if point.TimeZone == "" {
+				point.TimeZone = "UTC"
+			}
 		}
 		points = append(points, point)
 	}
 	return points
+}
+
+func civilOffset(day string, offset int) string {
+	date, _ := time.Parse(time.DateOnly, day)
+	return date.AddDate(0, 0, offset).Format(time.DateOnly)
 }
 
 func reserveBlock(needed, credit, unreserved int64) int64 {
