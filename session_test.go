@@ -242,7 +242,7 @@ func TestBrowserFailureDuringQuotaDrainWaitsForTick(t *testing.T) {
 				host: host, guest: guest, locked: true, epoch: 2, mode: "relay",
 				sessionUntil: testExpiry(), account: relayAccount{limit: tc.room}, remaining: 2,
 			}
-			grant, _, err := router.issue(&r.account, false, nil)
+			grant, _, err := router.issue(&r.account, false, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -34,14 +34,15 @@ type relayAccount struct {
 }
 
 type relayGrant struct {
-	account    *relayAccount
-	authorized bool
-	frozen     bool
-	expires    time.Time
-	revoked    bool
-	reason     string
-	queued     int
-	users      [2]string
+	account      *relayAccount
+	authorized   bool
+	adminAllowed func() bool
+	frozen       bool
+	expires      time.Time
+	revoked      bool
+	reason       string
+	queued       int
+	users        [2]string
 }
 
 type relayCredential struct {
@@ -72,11 +73,15 @@ func newRelayRouter(ip net.IP, ledger *dailyLedger) *relayRouter {
 	}
 }
 
-func (r *relayRouter) issue(account *relayAccount, authorized bool, urls []string) (*relayGrant, [2]iceServer, error) {
+func (g *relayGrant) unlimited() bool {
+	return g != nil && g.adminAllowed != nil && g.adminAllowed()
+}
+
+func (r *relayRouter) issue(account *relayAccount, authorized bool, urls []string, adminAllowed func() bool) (*relayGrant, [2]iceServer, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var servers [2]iceServer
-	grant := &relayGrant{account: account, authorized: authorized, expires: time.Now().Add(grantDuration)}
+	grant := &relayGrant{account: account, authorized: authorized, adminAllowed: adminAllowed, expires: time.Now().Add(grantDuration)}
 	for i := range servers {
 		name, err := randomToken()
 		if err != nil {
@@ -140,10 +145,16 @@ func (r *relayRouter) status(account *relayAccount, grant *relayGrant, authorize
 }
 
 func (r *relayRouter) statusWithDrain(account *relayAccount, grant *relayGrant, authorized bool) (int64, string, bool) {
+	return r.relayStatus(account, grant, authorized, grant.unlimited())
+}
+
+func (r *relayRouter) relayStatus(account *relayAccount, grant *relayGrant, authorized, unlimited bool) (int64, string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	remaining, available := r.ledger.balance(authorized)
-	if !authorized {
+	if unlimited {
+		remaining = 0
+	} else if !authorized {
 		remaining = min(remaining, account.limit-account.used)
 	}
 	if grant != nil {
@@ -160,6 +171,9 @@ func (r *relayRouter) statusWithDrain(account *relayAccount, grant *relayGrant, 
 	}
 	if grant != nil {
 		return remaining, grant.reason, false
+	}
+	if unlimited {
+		return 0, "", false
 	}
 	if !authorized && account.used >= account.limit {
 		return 0, "session_quota", false
@@ -253,7 +267,8 @@ func (s *relaySocket) WriteTo(data []byte, addr net.Addr) (int, error) {
 	r.forwardMu.Lock()
 	defer r.forwardMu.Unlock()
 	r.mu.Lock()
-	dst, grant, err := s.routeLocked(peer, len(data))
+	unlimited := s.credential != nil && s.credential.grant.unlimited()
+	dst, grant, err := s.routeLocked(peer, len(data), unlimited)
 	r.mu.Unlock()
 	if err != nil {
 		return 0, err
@@ -263,10 +278,15 @@ func (s *relaySocket) WriteTo(data []byte, addr net.Addr) (int, error) {
 	ledger := r.ledger
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	public, reserved, err := ledger.reserveLocked(count, grant.authorized)
+	var public, reserved int64
+	if unlimited {
+		err = ledger.reserveAdminLocked(count)
+	} else {
+		public, reserved, err = ledger.reserveLocked(count, grant.authorized)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if s.closed || dst.closed || !relayActive(grant) {
+	if s.closed || dst.closed || !relayActive(grant) || (unlimited && !grant.unlimited()) {
 		if err == nil {
 			ledger.publish()
 		}
@@ -281,16 +301,21 @@ func (s *relaySocket) WriteTo(data []byte, addr net.Addr) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ledger.spendLocked(public, reserved)
-	if !grant.authorized {
-		grant.account.used += count
+	if unlimited {
+		ledger.adminCredit -= count
+		ledger.publish()
+	} else {
+		ledger.spendLocked(public, reserved)
+		if !grant.authorized {
+			grant.account.used += count
+		}
 	}
 	grant.queued++
 	dst.packets <- relayPacket{data: append([]byte(nil), data...), source: s.address}
 	return len(data), nil
 }
 
-func (s *relaySocket) routeLocked(peer *net.UDPAddr, count int) (*relaySocket, *relayGrant, error) {
+func (s *relaySocket) routeLocked(peer *net.UDPAddr, count int, unlimited bool) (*relaySocket, *relayGrant, error) {
 	if s.closed || s.credential == nil {
 		return nil, nil, errRelayPeer
 	}
@@ -303,7 +328,7 @@ func (s *relaySocket) routeLocked(peer *net.UDPAddr, count int) (*relaySocket, *
 	if count > 1600 || len(dst.packets) == cap(dst.packets) {
 		return nil, nil, errRelayBusy
 	}
-	if !grant.authorized && int64(count) > grant.account.limit-grant.account.used {
+	if !unlimited && !grant.authorized && int64(count) > grant.account.limit-grant.account.used {
 		grant.reason = "session_quota"
 		return nil, nil, errSessionQuota
 	}

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +26,7 @@ type dailyUsage struct {
 	TimeZone string `json:"timeZone,omitempty"`
 	Public   int64  `json:"public"`
 	Reserved int64  `json:"reserved"`
+	Admin    int64  `json:"admin,omitempty"`
 }
 
 type usageFile struct {
@@ -47,6 +50,7 @@ type dailyLedger struct {
 	publicLimit, reserveLimit   int64
 	durable                     usageFile
 	publicCredit, reserveCredit int64
+	adminCredit                 int64
 	failed                      bool
 	settingsUncertain           bool
 	needsWrite                  bool
@@ -193,7 +197,7 @@ func readUsage(path string) (usageFile, error) {
 func validateUsage(value usageFile) error {
 	valid := func(usage dailyUsage) bool {
 		_, err := time.Parse(time.DateOnly, usage.Day)
-		return err == nil && usage.Public >= 0 && usage.Reserved >= 0
+		return err == nil && usage.Public >= 0 && usage.Reserved >= 0 && usage.Admin >= 0
 	}
 	if !valid(value.dailyUsage) || value.Version < 0 || value.Version > 2 || len(value.History) >= historyDays {
 		return errors.New("invalid quota ledger")
@@ -239,6 +243,7 @@ func (l *dailyLedger) advanceDay(now time.Time) {
 	}
 	l.zone, l.pending = zone, nil
 	l.publicCredit, l.reserveCredit = 0, 0
+	l.adminCredit = 0
 	l.needsWrite = true
 }
 
@@ -253,6 +258,7 @@ func (l *dailyLedger) spent() dailyUsage {
 	return dailyUsage{
 		Day: l.durable.Day, TimeZone: l.zone.String(),
 		Public: l.durable.Public - l.publicCredit, Reserved: l.durable.Reserved - l.reserveCredit,
+		Admin: l.durable.Admin - l.adminCredit,
 	}
 }
 
@@ -359,6 +365,50 @@ func (l *dailyLedger) spendLocked(public, reserved int64) {
 	l.publicCredit -= public
 	l.reserveCredit -= reserved
 	l.publish()
+}
+
+func (l *dailyLedger) reserveAdminLocked(n int64) error {
+	l.advanceDay(l.now())
+	if l.blocked() {
+		return errLedgerUnavailable
+	}
+	if block := reserveBlock(n, l.adminCredit, math.MaxInt64-l.durable.Admin); block > 0 {
+		l.durable.Admin += block
+		l.adminCredit += block
+		l.needsWrite = true
+	}
+	if l.adminCredit < n || !l.persistPending() {
+		l.publish()
+		return errLedgerUnavailable
+	}
+	return nil
+}
+
+type relayTotals struct {
+	Today int64 `json:"today"`
+	Month int64 `json:"month"`
+}
+
+func (l *dailyLedger) relayTotals() (relayTotals, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.advanceDay(l.now())
+	if l.needsWrite {
+		l.persistPending()
+		l.publish()
+	}
+	if l.blocked() {
+		return relayTotals{}, false
+	}
+	used := l.spent()
+	totals := relayTotals{Today: used.Public + used.Reserved + used.Admin}
+	totals.Month = totals.Today
+	for _, day := range l.durable.History {
+		if strings.HasPrefix(day.Day, used.Day[:7]) {
+			totals.Month += day.Public + day.Reserved + day.Admin
+		}
+	}
+	return totals, true
 }
 
 func (l *dailyLedger) persistPending() bool {

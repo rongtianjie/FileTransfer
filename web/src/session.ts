@@ -5,15 +5,15 @@ type Mode = 'direct' | 'relay'
 type Signal = RTCSessionDescriptionInit | RTCIceCandidateInit
 type Start = {
   type: 'start'; epoch: Epoch; initiator: boolean; mode: Mode; iceServers?: RTCIceServer[]
-  remaining?: number; authorized?: boolean
+  remaining?: number; authorized?: boolean; unlimited?: boolean
 }
 type ServerMessage = Start
   | { type: 'created'; code: string; token: string; expiresAt: number }
   | { type: 'joined'; token: string }
   | { type: 'request'; requestId: string }
   | { type: 'waiting' }
-  | { type: 'config'; relayAvailable: boolean; keyAvailable: boolean }
-  | { type: 'balance'; remaining: number; authorized: boolean }
+  | { type: 'config'; relayAvailable: boolean; keyAvailable: boolean; adminProof?: string }
+  | { type: 'balance'; remaining: number; authorized: boolean; unlimited?: boolean }
   | { type: 'signal'; epoch: Epoch; data: Signal }
   | { type: 'failed'; epoch: Epoch; mode: Mode; message?: string; reason?: string }
   | { type: 'closed' | 'error'; message?: string; reason?: string }
@@ -80,6 +80,8 @@ export class Session {
   keyAvailable = false
   remaining?: number
   authorized = false
+  unlimited = false
+  adminProof?: string
   upgradeBytes?: number
   retryFile?: File
   unconfirmedSave?: { name: string; message: string }
@@ -123,6 +125,7 @@ export class Session {
     ws.onclose = () => {
       if (this.socket !== ws) return
       this.socket = undefined
+      this.adminProof = undefined
       this.socketState = 'offline'
       this.reset('会话服务已断开。请重新连接，再创建或加入房间。')
       this.changed()
@@ -195,7 +198,7 @@ export class Session {
   }
 
   get canUpgrade() {
-    return this.mode === 'relay' && this.phase === 'connected' && !this.authorized &&
+    return this.mode === 'relay' && this.phase === 'connected' && !this.authorized && !this.unlimited &&
       this.upgradeBytes !== undefined && this.relayAvailable && this.keyAvailable
   }
 
@@ -278,6 +281,7 @@ export class Session {
     if (msg.type === 'config') {
       this.relayAvailable = msg.relayAvailable === true
       this.keyAvailable = msg.keyAvailable === true
+      if (msg.adminProof) this.adminProof = msg.adminProof
     } else if (msg.type === 'created' || msg.type === 'joined') {
       if (!this.busy || this.phase !== 'idle' || this.role !== (msg.type === 'created' ? 'host' : 'guest')) return
       this.token = msg.token
@@ -322,9 +326,10 @@ export class Session {
         this.mode = msg.mode
         this.message = (msg.reason && messages[msg.reason]) || msg.message || (msg.mode === 'direct' ? '直连未建立。' : '中继连接已中断。')
       } else if (msg.type === 'balance') {
-        this.remaining = msg.remaining
-        this.authorized = msg.authorized
-        if (this.upgradeBytes !== undefined && msg.remaining >= this.upgradeBytes) this.upgradeBytes = undefined
+        this.unlimited = msg.unlimited === true
+        this.remaining = this.mode === 'relay' && !this.unlimited ? msg.remaining : undefined
+        this.authorized = this.mode === 'relay' && msg.authorized
+        if (this.unlimited || (this.upgradeBytes !== undefined && msg.remaining >= this.upgradeBytes)) this.upgradeBytes = undefined
         this.transfer?.checkBudget()
       }
     }
@@ -337,7 +342,8 @@ export class Session {
     this.mode = msg.mode
     this.busy = false
     this.requestId = undefined
-    this.remaining = msg.mode === 'relay' ? msg.remaining : undefined
+    this.unlimited = msg.unlimited === true
+    this.remaining = msg.mode === 'relay' && !this.unlimited ? msg.remaining : undefined
     this.authorized = msg.mode === 'relay' && msg.authorized === true
     this.upgradeBytes = undefined
     this.message = ''
@@ -429,7 +435,7 @@ export class Session {
       if (this.finishingSave || channel.readyState !== 'open' || (!incoming && !attempt.ready)) return false
       // A guest offer sent before it sees the reservation gets to proceed.
       return !attempt.upgrade || (incoming && attempt.upgrade.phase === 'preparing')
-    }, msg => this.receiveUpgrade(attempt, msg))
+    }, msg => this.receiveUpgrade(attempt, msg), () => this.unlimited)
     this.transfer = transfer
     transfer.retryFile = this.retryFile
     channel.onopen = () => this.connectionChanged(attempt)
@@ -514,6 +520,7 @@ export class Session {
     this.busy = false
     this.remaining = undefined
     this.authorized = false
+    this.unlimited = false
     this.upgradeBytes = undefined
     this.retryFile = undefined
     // Save outcomes belong to the page and can arrive after the room closes.

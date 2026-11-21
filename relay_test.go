@@ -263,3 +263,26 @@ func TestRelayFullQueueAndClosePreserveAccounting(t *testing.T) {
 		t.Fatalf("ledger used %d bytes after admitting 64", used)
 	}
 }
+
+func TestAdminRelayUsesNeitherQuotaAndStopsBypassOnLogout(t *testing.T) {
+	ledger, err := openLedger(filepath.Join(t.TempDir(), "usage.json"), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := newRelayRouter(net.IPv4(192, 0, 2, 1), ledger)
+	signedIn := true
+	grant := &relayGrant{account: &relayAccount{}, expires: testExpiry(), adminAllowed: func() bool { return signedIn }}
+	host := allocateTestRelay(t, router, grant, true)
+	guest := allocateTestRelay(t, router, grant, false)
+	if _, err := host.WriteTo([]byte("admin"), guest.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	usage, _ := ledger.relayTotals()
+	if usage.Today != 5 || usage.Month != 5 || grant.account.used != 0 {
+		t.Fatalf("unexpected metering: %+v, account=%+v", usage, grant.account)
+	}
+	signedIn = false
+	if _, err := guest.WriteTo([]byte("x"), host.LocalAddr()); !errors.Is(err, errSessionQuota) {
+		t.Fatalf("packet after logout returned %v", err)
+	}
+}

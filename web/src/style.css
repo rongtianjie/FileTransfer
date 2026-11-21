@@ -81,6 +81,7 @@ h2 { font-weight: 650; font-size: 1.26rem; line-height: 1.4; }
 .top { border-bottom: 1px solid var(--line); }
 .bar { display: flex; justify-content: space-between; align-items: center; min-height: 66px; gap: 1em; }
 .bar-end { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .2rem clamp(.5rem, 2vw, 1rem); }
+.admin-relay-totals { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
 .admin-entry-action {
   display: inline-flex;
   align-items: center;

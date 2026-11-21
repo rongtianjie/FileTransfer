@@ -58,7 +58,7 @@ func (l *dailyLedger) scheduleTimeZone(zone *time.Location) error {
 
 func (l *dailyLedger) planTimeZone(now time.Time, zone *time.Location) (usageFile, *time.Location, *time.Location) {
 	next := l.durable
-	if l.pending == nil && l.inactive && l.durable.Unobserved && l.durable.Public == 0 && l.durable.Reserved == 0 {
+	if l.pending == nil && l.inactive && l.durable.Unobserved && l.durable.Public == 0 && l.durable.Reserved == 0 && l.durable.Admin == 0 {
 		next.Day = now.In(zone).Format(time.DateOnly)
 		// If the new local date already has an archived point, keep that
 		// point and switch on a later boundary instead.

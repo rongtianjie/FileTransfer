@@ -29,10 +29,11 @@ type Incoming = {
   writer?: DiskWriter; writes: Promise<void>; finished: boolean
 }
 
-const validSize = (size: unknown): size is number =>
-  typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 && size <= MAX_FILE
+const validSize = (size: unknown, max = MAX_FILE): size is number =>
+  typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 && size <= max
 
 const insufficientMessage = '当前中继余量不足以传输此文件。'
+const fileLimitMessage = '单个文件不能超过 2 GiB。'
 const uncertainMessage = '连接已断开，无法确认对方是否已保存文件。请先向对方确认。'
 
 const saveFailureMessage = '保存文件失败，请重新发送。'
@@ -78,6 +79,7 @@ export class Transfer {
   private upgrade: (size: number) => void
   private available: (incoming: boolean) => boolean
   private relaySwitch: (message: RelaySwitch) => void
+  private unlimited: () => boolean
 
   constructor(
     channel: RTCDataChannel,
@@ -87,6 +89,7 @@ export class Transfer {
     upgrade: (size: number) => void,
     available: (incoming: boolean) => boolean = () => true,
     relaySwitch: (message: RelaySwitch) => void = () => {},
+    unlimited: () => boolean = () => false,
   ) {
     this.channel = channel
     this.host = host
@@ -95,6 +98,7 @@ export class Transfer {
     this.upgrade = upgrade
     this.available = available
     this.relaySwitch = relaySwitch
+    this.unlimited = unlimited
     this.nextId = host ? 1 : 2
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = BUFFER / 2
@@ -110,10 +114,14 @@ export class Transfer {
     return !this.inProgress && !this.disposed && this.available(false)
   }
 
+  private get maxFileSize() {
+    return this.unlimited() ? Number.MAX_SAFE_INTEGER : MAX_FILE
+  }
+
   offer(file: File): boolean {
     if (!this.canOffer) return false
-    if (!validSize(file.size)) {
-      this.update({ ...emptyView, phase: 'stopped', message: '单个文件不能超过 2 GiB。' })
+    if (!validSize(file.size, this.maxFileSize)) {
+      this.update({ ...emptyView, phase: 'stopped', message: this.unlimited() ? '文件大小无效。' : fileLimitMessage })
       return false
     }
     this.retryFile = file
@@ -148,8 +156,13 @@ export class Transfer {
     const active = this.active
     // While streaming, TURN may already have counted bytes that are still awaiting disk ACK.
     // Check offers before sending; the session server enforces the live relay quota.
-    if (!active || (active.direction === 'out' ? active.accepted : active.writer)) return
+    if (!active) return
     const size = active.direction === 'out' ? active.file.size : active.size
+    if (size > this.maxFileSize && this.view.phase !== 'saving' && this.view.phase !== 'confirming') {
+      this.stop(fileLimitMessage, 'invalid')
+      return
+    }
+    if (active.direction === 'out' ? active.accepted : active.writer) return
     if (this.insufficient(size)) {
       this.markUpgrade(size)
       this.stop(insufficientMessage, 'quota')
@@ -302,7 +315,7 @@ export class Transfer {
   private receiveOffer(msg: Extract<Control, {type: 'offer'}>) {
     if (msg.id % 2 === (this.host ? 1 : 0) || msg.id <= this.lastOffer) return
     this.lastOffer = msg.id
-    if (!validSize(msg.size) || typeof msg.name !== 'string' || !msg.name || msg.name.length > 1024) {
+    if (!validSize(msg.size, this.maxFileSize) || typeof msg.name !== 'string' || !msg.name || msg.name.length > 1024) {
       this.send({ type: 'cancel', id: msg.id, reason: 'invalid' })
       return
     }

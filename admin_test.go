@@ -342,3 +342,71 @@ func TestAdminSettingsKeepHubAvailableAndFailClosedOnUncertainSave(t *testing.T)
 		t.Fatal("confirmed retry did not publish settings or restore quota")
 	}
 }
+
+func TestAdminGuestUnlocksRoomAndTotalsRequireSession(t *testing.T) {
+	ledger, err := openLedger(filepath.Join(t.TempDir(), "usage.json"), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHub(newRelayRouter([]byte{127, 0, 0, 1}, ledger), nil, []string{"turn:127.0.0.1:3478"}, "")
+	a := newAdmin("ops", "password", nil, h, ledger)
+	mux := http.NewServeMux()
+	a.register(mux)
+	post := func(path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest("POST", "https://transfer.test/api/admin/"+path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "https://transfer.test")
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	host, guest := testClient("host"), testClient("guest")
+	guest.adminProof = "guest-socket-proof"
+	h.clients[guest] = struct{}{}
+	h.handle(host, request{Type: "create", Code: "5500"})
+	created := expect(t, host, "created")
+	h.handle(guest, request{Type: "join", Code: "5500"})
+	expect(t, guest, "joined")
+	application := expect(t, host, "request")
+	h.handle(host, request{Type: "accept", Token: created.Token, RequestID: application.RequestID})
+	direct := expect(t, host, "start")
+	expect(t, guest, "start")
+
+	const proof = `{"adminProof":"guest-socket-proof"}`
+	if w := post("relay-totals", proof, nil); w.Code != 401 {
+		t.Fatalf("anonymous totals request returned %d", w.Code)
+	}
+	login := post("login", `{"username":"ops","password":"password"}`, nil)
+	if login.Code != 204 {
+		t.Fatalf("login returned %d", login.Code)
+	}
+	cookie := login.Result().Cookies()[0]
+	if w := post("relay-totals", `{"adminProof":"different-socket"}`, cookie); w.Code != 200 || guest.isAdmin() {
+		t.Fatalf("wrong proof identified guest: %d", w.Code)
+	}
+	if w := post("relay-totals", proof, cookie); w.Code != 200 || w.Body.String() != "{\"today\":0,\"month\":0}\n" {
+		t.Fatalf("unexpected totals: %d %s", w.Code, w.Body)
+	}
+	h.tick(time.Now())
+	if !expect(t, host, "balance").Unlimited || !expect(t, guest, "balance").Unlimited {
+		t.Fatal("guest login did not unlock both sides")
+	}
+	h.handle(host, request{Type: "failed", Token: created.Token, Epoch: direct.Epoch})
+	expect(t, host, "failed")
+	expect(t, guest, "failed")
+	h.handle(host, request{Type: "relay", Token: created.Token})
+	if !expect(t, host, "start").Unlimited || !expect(t, guest, "start").Unlimited {
+		t.Fatal("guest login did not permit relay while public and reserved quotas were exhausted")
+	}
+	if w := post("logout", "", cookie); w.Code != 204 {
+		t.Fatalf("logout returned %d", w.Code)
+	}
+	h.tick(time.Now())
+	if expect(t, host, "balance").Unlimited || expect(t, guest, "balance").Unlimited {
+		t.Fatal("room stayed unlimited after logout")
+	}
+}

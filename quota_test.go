@@ -243,3 +243,26 @@ func TestBrowserZoneWhenTURNDisabledDoesNotRecordCoverage(t *testing.T) {
 		t.Fatalf("enabled TURN didn't restore the configured zone: %+v", view)
 	}
 }
+
+func TestRelayTotalsSumOnlyCurrentSettlementMonth(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	l, err := openLedgerWithClock(filepath.Join(t.TempDir(), "usage.json"), 10, 10, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.charge(15, true) {
+		t.Fatal("October relay debit failed")
+	}
+	now = now.AddDate(0, 0, 1)
+	if !l.charge(12, true) {
+		t.Fatal("November relay debit failed")
+	}
+	now = now.AddDate(0, 0, 1)
+	if !l.charge(3, false) {
+		t.Fatal("November relay debit failed")
+	}
+	result, _ := l.relayTotals()
+	if result.Today != 3 || result.Month != 15 {
+		t.Fatalf("unexpected totals: %+v", result)
+	}
+}

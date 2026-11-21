@@ -80,6 +80,7 @@ func (a *admin) register(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	mux.HandleFunc("GET /api/admin/dashboard", a.guard(true, a.dashboard))
+	mux.HandleFunc("POST /api/admin/relay-totals", a.guard(true, a.relayTotals))
 	mux.HandleFunc("PUT /api/admin/config", a.guard(true, a.configure))
 	mux.HandleFunc("PATCH /api/admin/config", a.guard(true, a.configure))
 	mux.HandleFunc("PUT /api/admin/time-zone", a.guard(true, a.configureTimeZone))
@@ -118,14 +119,39 @@ func (a *admin) authenticated(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
+	return a.validSession(cookie.Value)
+}
+
+func (a *admin) validSession(token string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	expires, ok := a.sessions[cookie.Value]
+	expires, ok := a.sessions[token]
 	if ok && a.now().Before(expires) {
 		return true
 	}
-	delete(a.sessions, cookie.Value)
+	delete(a.sessions, token)
 	return false
+}
+
+func (a *admin) relayTotals(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		AdminProof string `json:"adminProof"`
+	}
+	if !readAdminJSON(w, r, &input) {
+		return
+	}
+	if input.AdminProof != "" {
+		// Bind the socket using its private proof so the cookie stays scoped to /api/admin/.
+		cookie, _ := r.Cookie(adminCookie)
+		token := cookie.Value
+		a.hub.bindAdmin(input.AdminProof, &socketAdminSession{valid: func() bool { return a.validSession(token) }})
+	}
+	totals, available := a.ledger.relayTotals()
+	if !available {
+		adminProblem(w, http.StatusServiceUnavailable, "中继流量数据暂不可用。")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, totals)
 }
 
 func (a *admin) allowLogin(source string, now time.Time) bool {

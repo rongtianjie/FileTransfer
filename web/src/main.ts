@@ -22,6 +22,7 @@ app.innerHTML = `
   <header class="top"><div class="frame bar">
     <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i></span>直达</div>
     <div class="bar-end">
+      <span id="admin-relay-totals" class="admin-relay-totals" hidden></span>
       <div class="socket"><span class="dot" aria-hidden="true"></span><span id="socket-label"></span></div>
       <div id="admin-entry"></div>
     </div>
@@ -75,7 +76,7 @@ app.innerHTML = `
     <div id="save-notices"></div>
     <footer>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="signup-tip">无需注册<span id="signup-tip" class="tip-bubble" role="tooltip">开箱即用，无需登录或绑定个人账号，保障数据隐私。</span></span>
-      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="size-tip">支持大文件传输<span id="size-tip" class="tip-bubble" role="tooltip">采用高效流式分块传输，单文件支持高达 2 GiB。</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="size-tip">支持大文件传输<span id="size-tip" class="tip-bubble" role="tooltip">普通房间单文件支持高达 2 GiB。有管理员登录的房间不设单文件上限。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="encryption-tip">端到端加密<span id="encryption-tip" class="tip-bubble" role="tooltip">基于 WebRTC 原生 DTLS/SCTP 加密协议，传输数据不经第三方留存。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${desktopChromium ? '极速流式落盘' : '实验性浏览器环境'}<span id="storage-tip" class="tip-bubble" role="tooltip">${desktopChromium ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : '当前浏览器可能缺乏流式磁盘写入支持，建议使用桌面版 Chrome 或 Edge 获得最佳体验。'}</span></span>
     </footer>
@@ -86,7 +87,7 @@ app.innerHTML = `
 `
 
 const find = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
-mountAdminEntry(find('admin-entry'))
+const syncAdminRoom = mountAdminEntry(find('admin-entry'), find('admin-relay-totals'))
 const home = find('home')
 const room = find('room')
 const fileInput = find<HTMLInputElement>('file-input')
@@ -175,14 +176,14 @@ function relayMarkup() {
         ${session.phase === 'failed' ? `<button class="primary" type="button" data-action="direct" ${disabled}>重试直连</button>` : ''}
         ${session.phase === 'failed' && session.relayAvailable ? `<button class="secondary" type="button" data-action="relay" ${disabled}>${session.mode === 'relay' ? '重试加密中继' : '启用加密中继'}</button>` : ''}
       </div>
-      ${session.relayAvailable && session.keyAvailable ? `
+      ${session.relayAvailable && session.keyAvailable && !session.unlimited ? `
         <form class="key-form" data-form="key">
           <div class="field-label">
             <label for="relay-key">中继密钥</label>
             <span class="tip-trigger" tabindex="0" aria-describedby="key-tip">
               <span class="sr-only">中继密钥说明</span>
               <span class="help-icon" aria-hidden="true">?</span>
-              <span id="key-tip" class="tip-bubble" role="tooltip">房主需输入管理员设置的中继密钥，才能为此房间使用保留额度。管理员登录仅用于管理配置。</span>
+              <span id="key-tip" class="tip-bubble" role="tooltip">普通房间可由房主输入中继密钥来使用保留额度。</span>
             </span>
           </div>
           <div class="button-row">
@@ -241,6 +242,7 @@ function setText(id: string, value: string) {
 
 let previousPhase = session.phase
 function draw() {
+  syncAdminRoom(session.adminProof)
   const idle = session.phase === 'idle'
   const active = document.activeElement as HTMLElement | null
   const stateChanged = previousPhase !== session.phase
@@ -319,7 +321,8 @@ function draw() {
   setText('copy-feedback', copyMessage)
   if (find('relay-balance')) {
     const remaining = session.remaining
-    setText('relay-balance', (session.authorized ? '专属中继余量' : '免密中继余量') +
+    setText('relay-balance', session.unlimited ? '管理员中继不限额' :
+      (session.authorized ? '专属中继余量' : '免密中继余量') +
       (remaining === undefined ? '' : ` ${formatByteSize(Math.max(0, remaining))}`))
   }
   const view = session.transfer?.view

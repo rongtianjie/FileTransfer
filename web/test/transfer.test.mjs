@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { Transfer, MAX_FILE, CHUNK, WINDOW } from '../src/transfer.ts'
 
-function pair(budget = () => undefined) {
+function pair(budget = () => undefined, unlimited = () => false) {
   const create = () => ({
     readyState: 'open',
     bufferedAmount: 0,
@@ -18,10 +18,23 @@ function pair(budget = () => undefined) {
   left.other = right
   right.other = left
   const requests = []
-  const host = new Transfer(left, true, () => {}, budget, n => requests.push(n))
-  const guest = new Transfer(right, false, () => {}, budget, n => requests.push(n))
+  const host = new Transfer(left, true, () => {}, budget, n => requests.push(n), undefined, undefined, unlimited)
+  const guest = new Transfer(right, false, () => {}, budget, n => requests.push(n), undefined, undefined, unlimited)
   return { host, guest, left, right, requests }
 }
+
+test('both ends accept an oversized file offer only while the room is unlimited', async () => {
+  let allowed = true
+  const { host, guest } = pair(undefined, () => allowed)
+  const oversized = { name: 'large.bin', size: MAX_FILE + 1 }
+  assert.equal(host.offer(oversized), true)
+  await until(() => guest.view.phase === 'offered')
+  allowed = false
+  guest.checkBudget()
+  await until(() => host.view.phase === 'stopped')
+  assert.equal(guest.view.phase, 'stopped')
+  assert.equal(host.offer(oversized), false)
+})
 
 async function until(predicate) {
   for (let i = 0; i < 100; i++) {

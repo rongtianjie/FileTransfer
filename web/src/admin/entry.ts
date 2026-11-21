@@ -1,4 +1,5 @@
 import { adminLogin, AdminError } from './model.ts'
+import { formatByteSize } from '../byte-size.ts'
 
 type EntryState = 'signed-in' | 'signed-out' | 'hidden' | 'retry'
 
@@ -8,7 +9,7 @@ function adminEntryState(status: number | undefined): EntryState | undefined {
   if (status === 404) return 'hidden'
 }
 
-export function mountAdminEntry(container: HTMLElement) {
+export function mountAdminEntry(container: HTMLElement, totals?: HTMLElement) {
   container.hidden = true
   container.innerHTML = `
     <button class="admin-entry-action tip-trigger" type="button" aria-describedby="home-admin-entry-tip">
@@ -47,6 +48,8 @@ export function mountAdminEntry(container: HTMLElement) {
   const notice = form.querySelector<HTMLElement>('[role="status"]')!
   let revision = 0
   let state: EntryState | undefined
+  let adminProof: string | undefined
+  let totalsRevision = 0
 
   function render(next: EntryState) {
     state = next
@@ -60,6 +63,39 @@ export function mountAdminEntry(container: HTMLElement) {
     open.hidden = state !== 'signed-out' && !retrying
     config.hidden = state !== 'signed-in'
     container.hidden = state === 'hidden'
+    if (totals) {
+      totals.hidden = state !== 'signed-in'
+      if (totals.hidden) {
+        totals.textContent = ''
+        totalsRevision++
+      } else {
+        void refreshTotals()
+      }
+    }
+  }
+
+  async function refreshTotals() {
+    if (!totals || state !== 'signed-in') return
+    const request = ++totalsRevision
+    try {
+      const response = await fetch('/api/admin/relay-totals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminProof }),
+      })
+      if (request !== totalsRevision) return
+      if (response.status === 401) {
+        render('signed-out')
+        return
+      }
+      if (!response.ok) throw new Error('Relay totals unavailable')
+      const { today, month } = await response.json() as { today: number; month: number }
+      if (request === totalsRevision) {
+        totals.textContent = `今日中继 ${formatByteSize(today)} · 本月中继 ${formatByteSize(month)}`
+      }
+    } catch {
+      if (request === totalsRevision) totals.textContent = '中继流量暂不可用'
+    }
   }
 
   async function refresh(retry = true, initiatedByButton = false) {
@@ -125,5 +161,15 @@ export function mountAdminEntry(container: HTMLElement) {
 
   window.addEventListener('pageshow', () => void refresh())
   window.addEventListener('focus', () => void refresh())
+  if (totals) {
+    window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshTotals()
+    }, 15_000)
+  }
   void refresh()
+  return (proof: string | undefined) => {
+    if (proof === adminProof) return
+    adminProof = proof
+    void refreshTotals()
+  }
 }

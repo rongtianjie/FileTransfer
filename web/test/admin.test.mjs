@@ -115,9 +115,17 @@ test('homepage admin discovery offers an accessible retry after a sustained init
   const page = control({ ':scope > button': button, a: link, dialog })
 
   const timers = []
+  const totals = control()
+  totals.hidden = true
+  const totalsRequests = []
   const browser = control()
   browser.setTimeout = callback => timers.push(callback)
-  t.mock.method(globalThis, 'fetch', async () => {
+  browser.setInterval = () => {}
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url === '/api/admin/relay-totals') {
+      totalsRequests.push(JSON.parse(options.body))
+      return Response.json({ today: 123456789, month: 2456789012 })
+    }
     const next = responses.shift()
     if (next instanceof Error) throw next
     return new Response(null, { status: next })
@@ -131,7 +139,8 @@ test('homepage admin discovery offers an accessible retry after a sustained init
 
   const responses = [503, new Error('offline'), 204, 502, 502, 401, 404]
   const settle = () => new Promise(resolve => setImmediate(resolve))
-  mountAdminEntry(page)
+  const syncRoom = mountAdminEntry(page, totals)
+  syncRoom('room-proof')
   await settle()
   assert.equal(timers.length, 1)
   timers.shift()()
@@ -139,6 +148,8 @@ test('homepage admin discovery offers an accessible retry after a sustained init
   assert.equal(page.hidden, false)
   assert.equal(button.hidden, false)
   assert.equal(link.hidden, true)
+  assert.equal(totals.hidden, true)
+  assert.deepEqual(totalsRequests, [])
   assert.equal(label.textContent, '重试管理后台')
   assert.equal(button.attributes.get('aria-label'), label.textContent)
   assert.match(tooltip.textContent, /重新检查/)
@@ -150,6 +161,9 @@ test('homepage admin discovery offers an accessible retry after a sustained init
   assert.equal(button.hidden, true)
   assert.equal(link.hidden, false)
   assert.equal(link.focused, true)
+  assert.equal(totals.hidden, false)
+  assert.equal(totals.textContent, '今日中继 123.5 MB · 本月中继 2.5 GB')
+  assert.deepEqual(totalsRequests, [{ adminProof: 'room-proof' }])
 
   browser.emit('focus')
   await settle()
@@ -161,6 +175,8 @@ test('homepage admin discovery offers an accessible retry after a sustained init
   await settle()
   assert.equal(button.hidden, false)
   assert.equal(label.textContent, '管理后台')
+  assert.equal(totals.hidden, true)
+  assert.equal(totals.textContent, '')
   assert.equal(button.attributes.get('aria-label'), label.textContent)
   assert.match(tooltip.textContent, /登录/)
   assert.equal(button.attributes.get('aria-haspopup'), 'dialog')

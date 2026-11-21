@@ -33,11 +33,11 @@ func TestTURNClientsUseOnlyTheirPairAndShareTheHardLimit(t *testing.T) {
 	t.Cleanup(func() { _ = relay.Close() })
 
 	account := &relayAccount{limit: 8}
-	grant, credentials, err := router.issue(account, false, nil)
+	grant, credentials, err := router.issue(account, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, other, err := router.issue(&relayAccount{limit: 10}, false, nil)
+	_, other, err := router.issue(&relayAccount{limit: 10}, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

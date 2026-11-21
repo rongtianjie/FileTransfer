@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -44,6 +45,8 @@ type response struct {
 	ICEServers     []iceServer     `json:"iceServers,omitempty"`
 	Remaining      int64           `json:"remaining"`
 	Authorized     bool            `json:"authorized"`
+	Unlimited      bool            `json:"unlimited,omitempty"`
+	AdminProof     string          `json:"adminProof,omitempty"`
 	RelayAvailable bool            `json:"relayAvailable"`
 	KeyAvailable   bool            `json:"keyAvailable"`
 	Message        string          `json:"message,omitempty"`
@@ -52,13 +55,24 @@ type response struct {
 }
 
 type sessionClient struct {
-	unboundAt time.Time
-	source    string
-	out       chan response
-	conn      *websocket.Conn
-	room      *room
-	token     string
-	ready     bool
+	unboundAt    time.Time
+	source       string
+	out          chan response
+	conn         *websocket.Conn
+	room         *room
+	token        string
+	ready        bool
+	adminProof   string
+	adminSession atomic.Pointer[socketAdminSession]
+}
+
+type socketAdminSession struct {
+	valid func() bool
+}
+
+func (c *sessionClient) isAdmin() bool {
+	session := c.adminSession.Load()
+	return session != nil && session.valid()
 }
 
 func (c *sessionClient) send(event response) {
@@ -88,8 +102,20 @@ type room struct {
 	account                             relayAccount
 	grant                               *relayGrant
 	authorized                          bool
+	unlimited                           bool
 	keyGeneration                       uint64
 	remaining                           int64
+}
+
+func (h *hub) bindAdmin(proof string, session *socketAdminSession) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client := range h.clients {
+		if client.adminProof == proof {
+			client.adminSession.Store(session)
+			break
+		}
+	}
 }
 
 func (r *room) peer(client *sessionClient) *sessionClient {
@@ -428,6 +454,7 @@ func (h *hub) start(r *room, mode string, servers [2]iceServer, now time.Time) {
 	}
 	r.epoch++
 	r.mode, r.failed = mode, false
+	r.unlimited = r.host.isAdmin() || r.guest.isAdmin()
 	r.host.ready, r.guest.ready = false, false
 	r.connectUntil = now.Add(connectTTL)
 	for i, c := range []*sessionClient{r.host, r.guest} {
@@ -439,7 +466,7 @@ func (h *hub) start(r *room, mode string, servers [2]iceServer, now time.Time) {
 			config = []iceServer{servers[i]}
 		}
 		c.send(response{Type: "start", Epoch: r.epoch, Mode: mode, Initiator: i == 0,
-			ICEServers: config, Authorized: r.authorized, Remaining: r.remaining})
+			ICEServers: config, Authorized: r.authorized, Remaining: r.remaining, Unlimited: r.unlimited})
 	}
 }
 
@@ -479,12 +506,14 @@ func (h *hub) startRelay(c *sessionClient, r *room, input request, now time.Time
 		}
 		authorized = true
 	}
-	remaining, reason := h.router.status(&r.account, nil, authorized)
+	host, guest := r.host, r.guest
+	adminAllowed := func() bool { return host.isAdmin() || guest.isAdmin() }
+	remaining, reason, _ := h.router.relayStatus(&r.account, nil, authorized, adminAllowed())
 	if reason != "" {
 		c.problem(reason, failureMessage(reason))
 		return
 	}
-	grant, servers, err := h.router.issue(&r.account, authorized, h.turnURLs)
+	grant, servers, err := h.router.issue(&r.account, authorized, h.turnURLs, adminAllowed)
 	if err != nil {
 		c.problem("relay_unavailable", "中继暂时不可用，请重试。")
 		return
@@ -545,21 +574,24 @@ func (h *hub) tick(now time.Time) {
 	}
 	for r := range h.rooms {
 		h.expireRoom(r, now)
-		if r.host.room != r || !r.locked || r.failed {
+		if r.host.room != r || !r.locked {
 			continue
 		}
+		remaining := r.remaining
+		unlimited := r.host.isAdmin() || r.guest.isAdmin()
 		if r.grant != nil {
-			remaining, reason := h.router.status(&r.account, r.grant, r.authorized)
+			var reason string
+			remaining, reason, _ = h.router.relayStatus(&r.account, r.grant, r.authorized, unlimited)
 			if reason != "" {
 				h.fail(r, reason)
 				continue
 			}
-			if remaining != r.remaining {
-				r.remaining = remaining
-				r.notify(response{Type: "balance", Remaining: remaining, Authorized: r.authorized})
-			}
 		}
-		if !(r.host.ready && r.guest.ready) && !now.Before(r.connectUntil) {
+		if remaining != r.remaining || unlimited != r.unlimited {
+			r.remaining, r.unlimited = remaining, unlimited
+			r.notify(response{Type: "balance", Remaining: remaining, Authorized: r.authorized, Unlimited: unlimited})
+		}
+		if !r.failed && !(r.host.ready && r.guest.ready) && !now.Before(r.connectUntil) {
 			h.fail(r, "connection_failed")
 		}
 	}
@@ -613,15 +645,20 @@ func (h *hub) serveSocket(origin string) http.HandlerFunc {
 			}
 		}()
 
+		proof, err := randomToken()
+		if err != nil {
+			http.Error(w, "session unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer conn.Close()
-		client := &sessionClient{source: source, out: make(chan response, 96), conn: conn, unboundAt: time.Now()}
+		client := &sessionClient{source: source, out: make(chan response, 96), conn: conn, unboundAt: time.Now(), adminProof: proof}
 		h.mu.Lock()
 		h.clients[client] = struct{}{}
-		client.send(response{Type: "config", RelayAvailable: h.router != nil, KeyAvailable: h.hasKey})
+		client.send(response{Type: "config", RelayAvailable: h.router != nil, KeyAvailable: h.hasKey, AdminProof: proof})
 		h.mu.Unlock()
 		defer h.detach(client)
 		done := make(chan struct{})
