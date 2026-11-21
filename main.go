@@ -127,9 +127,6 @@ func run() error {
 			return err
 		}
 		defer relay.Close()
-		if err := ledger.activate(); err != nil {
-			return err
-		}
 		log.Printf("TURN listening on %s", udp.LocalAddr())
 	}
 	if ledger == nil && username != "" {
@@ -184,6 +181,12 @@ func run() error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
+	}
+	defer listener.Close()
+	if router != nil {
+		if err := ledger.activate(); err != nil {
+			return err
+		}
 	}
 	log.Printf("Web server listening on %s", listener.Addr())
 
