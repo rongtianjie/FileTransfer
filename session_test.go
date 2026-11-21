@@ -33,6 +33,15 @@ func TestPairRejectsThirdDeviceAndOnlyHostCanStartRelayAfterFailure(t *testing.T
 	if directHost.Mode != "direct" || !directHost.Initiator || directGuest.Initiator || len(directHost.ICEServers) != 1 || directHost.ICEServers[0].Username != "" {
 		t.Fatalf("unexpected direct configuration: %+v", directHost)
 	}
+	hub.handle(host, request{Type: "ready", Token: created.Token, Epoch: directHost.Epoch})
+	if stats := hub.stats(); stats.Active != 1 || stats.Direct != 0 {
+		t.Fatalf("one ready peer counted as a direct connection: %+v", stats)
+	}
+	hub.handle(guest, request{Type: "ready", Token: joined.Token, Epoch: directGuest.Epoch})
+	if stats := hub.stats(); stats.Direct != 1 || stats.Relay != 0 {
+		t.Fatalf("missing ready direct connection: %+v", stats)
+	}
+
 	hub.handle(host, request{Type: "relay", Token: created.Token})
 	expect(t, host, "error")
 	hub.handle(host, request{Type: "failed", Token: created.Token, Epoch: directHost.Epoch})
@@ -69,6 +78,54 @@ func TestPairRejectsThirdDeviceAndOnlyHostCanStartRelayAfterFailure(t *testing.T
 	}
 	hub.handle(host, request{Type: "signal", Token: created.Token, Epoch: paid.Epoch, Data: json.RawMessage(`{"type":"offer","sdp":"new"}`)})
 	expect(t, guest, "signal")
+
+	hub.handle(host, request{Type: "ready", Token: created.Token, Epoch: paid.Epoch})
+	hub.handle(guest, request{Type: "ready", Token: joined.Token, Epoch: paid.Epoch})
+	if stats := hub.stats(); stats.Direct != 0 || stats.Relay != 1 || stats.Failures["connection_failed"] != 1 {
+		t.Fatalf("unexpected stats after switching to relay: %+v", stats)
+	}
+	allocate := turn.AllocateListenerConfig{Network: "udp4", Realm: turnRealm, UserID: paid.ICEServers[0].Username}
+	existing, _, err := router.AllocatePacketConn(allocate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer existing.Close()
+
+	dir := t.TempDir()
+	cfg, err := openAdminSettings(dir, 500_000_000, 500_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newAdmin("ops", "test", cfg, hub, ledger)
+	public, reserved := int64(500_000_000), int64(500_000_000)
+	if err := ops.update(configUpdate{PublicLimit: &public, ReservedLimit: &reserved, KeyAction: "replace", Key: "rotated"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := router.auth(&turn.RequestAttributes{Username: paid.ICEServers[0].Username, Realm: turnRealm}); !ok {
+		t.Fatal("rotating the key interrupted credentials already issued")
+	}
+	if replacement, _, err := router.AllocatePacketConn(allocate); err == nil {
+		replacement.Close()
+		t.Fatal("rotated key's credential allowed a new TURN allocation")
+	}
+
+	hub.handle(host, request{Type: "failed", Token: created.Token, Epoch: paid.Epoch})
+	expect(t, host, "failed")
+	expect(t, guest, "failed")
+	hub.handle(host, request{Type: "relay", Token: created.Token, Key: "test relay key"})
+	if message := expect(t, host, "error"); message.Reason != "invalid_key" {
+		t.Fatal("rotated key remained valid")
+	}
+	hub.handle(host, request{Type: "relay", Token: created.Token})
+	if reconnect := expect(t, host, "start"); reconnect.Authorized {
+		t.Fatal("a previous authorization survived rotation on reconnect")
+	}
+	expect(t, guest, "start")
+	hub.handle(host, request{Type: "relay", Token: created.Token, Key: "rotated"})
+	if reconnect := expect(t, host, "start"); !reconnect.Authorized {
+		t.Fatal("new key did not authorize relay")
+	}
+	expect(t, guest, "start")
 
 	hub.detach(host)
 	expect(t, guest, "closed")

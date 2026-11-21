@@ -88,6 +88,7 @@ type room struct {
 	account                             relayAccount
 	grant                               *relayGrant
 	authorized                          bool
+	keyGeneration                       uint64
 	remaining                           int64
 }
 
@@ -126,6 +127,8 @@ type hub struct {
 	router             *relayRouter
 	hasKey             bool
 	keyHash            [32]byte
+	keyGeneration      uint64
+	failures           map[string]uint64
 }
 
 func newHub(router *relayRouter, stunURLs, turnURLs []string, key string) *hub {
@@ -133,7 +136,7 @@ func newHub(router *relayRouter, stunURLs, turnURLs []string, key string) *hub {
 		pending: make(map[string]*room), rooms: make(map[*room]struct{}), clients: make(map[*sessionClient]struct{}),
 		windows: make(map[rateKey]rateWindow), connections: make(map[string]int),
 		router: router, stunURLs: stunURLs, turnURLs: turnURLs,
-		hasKey: key != "", keyHash: sha256.Sum256([]byte(key)),
+		hasKey: key != "", keyHash: sha256.Sum256([]byte(key)), failures: make(map[string]uint64),
 	}
 }
 
@@ -440,7 +443,7 @@ func (h *hub) startRelay(c *sessionClient, r *room, key string, now time.Time) {
 		c.problem("relay_unavailable", "当前站点未启用加密中继。")
 		return
 	}
-	authorized := r.authorized
+	authorized := r.authorized && r.keyGeneration == h.keyGeneration
 	if key != "" {
 		if !h.allowed(c, "key", 6, now) {
 			return
@@ -464,6 +467,7 @@ func (h *hub) startRelay(c *sessionClient, r *room, key string, now time.Time) {
 	}
 	h.router.revoke(r.grant)
 	r.grant, r.authorized, r.remaining = grant, authorized, remaining
+	r.keyGeneration = h.keyGeneration
 	h.start(r, "relay", servers, now)
 }
 
@@ -490,6 +494,7 @@ func (h *hub) failureReason(r *room) string {
 }
 
 func (h *hub) fail(r *room, reason string) {
+	h.failures[reason]++
 	r.failed = true
 	r.failedUntil = time.Now().Add(failedRoomTTL)
 	if r.grant != nil {
@@ -590,6 +595,7 @@ func (h *hub) serveSocket(origin string) http.HandlerFunc {
 		client := &sessionClient{source: source, out: make(chan response, 96), conn: conn, unboundAt: time.Now()}
 		h.mu.Lock()
 		h.clients[client] = struct{}{}
+		client.send(response{Type: "config", RelayAvailable: h.router != nil, KeyAvailable: h.hasKey})
 		h.mu.Unlock()
 		defer h.detach(client)
 		done := make(chan struct{})
@@ -598,7 +604,6 @@ func (h *hub) serveSocket(origin string) http.HandlerFunc {
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(60 * time.Second)) })
 		go writeEvents(client, done)
-		client.send(response{Type: "config", RelayAvailable: h.router != nil, KeyAvailable: h.hasKey})
 		window := time.Now()
 		messages := 0
 		for {

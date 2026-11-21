@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#172746">
+    <meta name="robots" content="noindex">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+    <title>直达 · 管理后台</title>
+  </head>
+  <body>
+    <header class="top">
+      <div class="frame top-inner">
+        <a class="brand" href="/" aria-label="直达传输首页">
+          <span class="mark" aria-hidden="true"></span>直达
+        </a>
+        <span class="top-label">管理后台</span>
+        <nav id="admin-nav" aria-label="后台导航" hidden>
+          <a href="#history">流量趋势</a>
+          <a href="#settings">中继设置</a>
+          <button id="logout" type="button">退出登录</button>
+        </nav>
+      </div>
+    </header>
+    <main class="frame">
+      <p id="page-status" class="notice" role="status">正在检查登录状态…</p>
+      <button id="retry" type="button" hidden>重试</button>
+      <section class="login" id="login-view" aria-labelledby="login-title" hidden>
+        <h1 id="login-title">管理员登录</h1>
+        <form id="login-form">
+          <label for="username">用户名</label>
+          <input id="username" autocomplete="username" required>
+          <label for="password">密码</label>
+          <input id="password" type="password" autocomplete="current-password" required>
+          <button class="primary" id="login-submit">登录</button>
+        </form>
+        <p id="login-status" class="notice" role="status"></p>
+      </section>
+      <div id="dashboard" hidden>
+        <div class="heading dashboard-heading">
+          <h1 id="dashboard-title" tabindex="-1">中继运行概览</h1>
+          <div class="overview-controls">
+            <span id="relay-status" class="relay-status"></span>
+            <button id="refresh" type="button">刷新数据</button>
+          </div>
+        </div>
+        <p class="notice" id="ledger-status" role="status"></p>
+        <section class="panel quota-panel" aria-labelledby="quota-title">
+          <div class="heading">
+            <h2 id="quota-title">今日额度</h2>
+            <span class="muted">按 UTC 日结算</span>
+          </div>
+          <div class="quota-grid" id="quotas"></div>
+        </section>
+        <section class="panel history-panel" id="history" aria-labelledby="history-title">
+          <div class="heading">
+            <h2 id="history-title">中继流量趋势</h2>
+            <div id="range" class="range" role="group" aria-label="流量周期">
+              <button type="button" data-days="7" aria-pressed="false">7 天</button>
+              <button type="button" data-days="30" aria-pressed="true">30 天</button>
+              <button type="button" data-days="90" aria-pressed="false">90 天</button>
+            </div>
+          </div>
+          <p class="muted">按 UTC 日统计额度消耗，含协议开销和重传。</p>
+          <p class="notice" id="history-status" role="status"></p>
+          <div id="plot" hidden>
+            <ul class="legend" aria-label="图例">
+              <li class="public-series">公共额度</li>
+              <li class="reserved-series">保留额度</li>
+            </ul>
+            <canvas id="chart" aria-hidden="true"></canvas>
+          </div>
+          <div class="date-readout" id="date-readout" hidden>
+            <div>
+              <label for="history-date">查看日期（UTC）</label>
+              <div class="date-controls">
+                <button id="previous-date" type="button" aria-label="前一天">‹</button>
+                <select id="history-date"></select>
+                <button id="next-date" type="button" aria-label="后一天">›</button>
+              </div>
+            </div>
+            <dl class="readings" aria-live="polite">
+              <div><dt>公共额度用量</dt><dd id="history-public"></dd></div>
+              <div><dt>保留额度用量</dt><dd id="history-reserved"></dd></div>
+            </dl>
+          </div>
+        </section>
+        <div class="detail-grid">
+          <section class="panel rooms-panel" aria-labelledby="rooms-title">
+            <h2 id="rooms-title">连接状态</h2>
+            <dl class="room-stats">
+              <div><dt>活跃配对</dt><dd id="rooms-active"></dd></div>
+              <div><dt>直连就绪</dt><dd id="rooms-direct"></dd></div>
+              <div><dt>中继就绪</dt><dd id="rooms-relay"></dd></div>
+            </dl>
+            <h3>失败原因（本次运行）</h3>
+            <dl class="failures" id="failures"></dl>
+            <p class="muted" id="no-failures">暂无失败记录。</p>
+          </section>
+          <section class="panel settings-panel" id="settings" aria-labelledby="settings-title">
+            <h2 id="settings-title">中继设置</h2>
+            <p class="muted" id="limit-help">每日额度按字节填写，每池最多 1 PiB。</p>
+            <form id="settings-form">
+              <div class="limit-fields">
+                <div>
+                  <label for="public-limit">公共额度（字节）</label>
+                  <input id="public-limit" inputmode="numeric" aria-describedby="limit-help" required>
+                </div>
+                <div>
+                  <label for="reserved-limit">保留额度（字节）</label>
+                  <input id="reserved-limit" inputmode="numeric" aria-describedby="limit-help" required>
+                </div>
+              </div>
+              <div class="key-fields">
+                <label for="key-action">中继密钥</label>
+                <p class="muted" id="key-state"></p>
+                <select id="key-action" aria-describedby="key-state">
+                  <option value="keep">保留现状</option>
+                  <option value="replace">替换密钥</option>
+                  <option value="clear">清除密钥</option>
+                </select>
+                <div id="new-key-field" hidden>
+                  <label for="new-key">新中继密钥</label>
+                  <input id="new-key" type="password" autocomplete="new-password" disabled>
+                </div>
+              </div>
+              <button class="primary" id="save">保存设置</button>
+            </form>
+            <p class="notice" id="settings-status" role="status"></p>
+          </section>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="/src/admin/main.ts"></script>
+  </body>
+</html>

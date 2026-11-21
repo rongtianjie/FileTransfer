@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"net"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,6 +90,24 @@ func TestTURNClientsUseOnlyTheirPairAndShareTheHardLimit(t *testing.T) {
 	if remaining, reason := router.status(account, grant, false); remaining != 0 || reason != "session_quota" {
 		t.Fatalf("expected exhausted session, remaining %d with reason %q", remaining, reason)
 	}
+	cfg, err := openAdminSettings(t.TempDir(), 1000, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := newAdmin("ops", "test", cfg, newHub(router, nil, nil, ""), ledger)
+	request := httptest.NewRequest("GET", "/api/admin/dashboard?days=7", nil)
+	result := httptest.NewRecorder()
+	ops.dashboard(result, request)
+	var dashboard adminDashboard
+	if err := json.NewDecoder(result.Body).Decode(&dashboard); err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.History) != 7 || dashboard.Public.Used != 8 || dashboard.Reserved.Used != 0 ||
+		dashboard.History[6].Public == nil || *dashboard.History[6].Public != 8 ||
+		dashboard.History[6].Reserved == nil || *dashboard.History[6].Reserved != 0 {
+		t.Fatalf("expected the dashboard to count the eight relayed bytes once, got %+v", dashboard)
+	}
+
 	unknown := turnClient(t, serverAddr, iceServer{Username: "unknown", Credential: "unknown"})
 	if conn, err := unknown.Allocate(); err == nil {
 		conn.Close()

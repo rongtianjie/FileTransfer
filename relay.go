@@ -36,6 +36,7 @@ type relayAccount struct {
 type relayGrant struct {
 	account    *relayAccount
 	authorized bool
+	frozen     bool
 	expires    time.Time
 	revoked    bool
 	reason     string
@@ -93,6 +94,18 @@ func (r *relayRouter) issue(account *relayAccount, authorized bool, urls []strin
 		}
 	}
 	return grant, servers, nil
+}
+
+// Existing allocations keep their grant after a key change. A reconnect
+// requires a new grant, so an old username cannot allocate new sockets.
+func (r *relayRouter) freezePaidAllocations() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, credential := range r.users {
+		if credential.grant.authorized {
+			credential.grant.frozen = true
+		}
+	}
 }
 
 func (r *relayRouter) revoke(grant *relayGrant) {
@@ -166,7 +179,7 @@ func (r *relayRouter) AllocatePacketConn(request turn.AllocateListenerConfig) (n
 	}
 	credential := r.users[request.UserID]
 	if request.Realm != turnRealm || credential == nil || !relayActive(credential.grant) ||
-		credential.allocations >= maxRelayAllocationsPerDevice {
+		credential.grant.frozen || credential.allocations >= maxRelayAllocationsPerDevice {
 		return nil, nil, errors.New("relay allocation unavailable for this device")
 	}
 	for attempts := 0; attempts < 16384; attempts++ {

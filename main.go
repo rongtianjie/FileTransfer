@@ -52,14 +52,14 @@ func run() error {
 		return fmt.Errorf("build the web frontend first (npm --prefix web run build): %w", err)
 	}
 
-	var router *relayRouter
-	var stunURLs, turnURLs []string
-	if ip := os.Getenv("FILETRANSFER_TURN_IP"); ip != "" {
-		udpAddr := env("FILETRANSFER_TURN_UDP", "127.0.0.1:3478")
-		turnHost := env("FILETRANSFER_TURN_HOST", ip)
-		if strings.ContainsAny(turnHost, ":/?#@ \t\r\n") {
-			return errors.New("FILETRANSFER_TURN_HOST must be an IPv4 address or hostname without a port")
-		}
+	username, adminPassword, err := adminCredentials()
+	if err != nil {
+		return err
+	}
+	turnIP := os.Getenv("FILETRANSFER_TURN_IP")
+	dir := env("FILETRANSFER_DATA_DIR", "data")
+	var settings *adminSettings
+	if turnIP != "" || username != "" {
 		publicLimit, err := byteLimit("FILETRANSFER_PUBLIC_DAILY_BYTES", 20_000_000_000)
 		if err != nil {
 			return err
@@ -68,7 +68,6 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		dir := env("FILETRANSFER_DATA_DIR", "data")
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
@@ -77,12 +76,28 @@ func run() error {
 			return err
 		}
 		defer lock.Close()
-		ledger, err := openLedger(filepath.Join(dir, "relay-usage.json"), publicLimit, reservedLimit)
+		settings, err = openAdminSettings(dir, publicLimit, reservedLimit)
+		if err != nil {
+			return err
+		}
+	}
+
+	var router *relayRouter
+	var ledger *dailyLedger
+	var stunURLs, turnURLs []string
+	if turnIP != "" {
+		udpAddr := env("FILETRANSFER_TURN_UDP", "127.0.0.1:3478")
+		turnHost := env("FILETRANSFER_TURN_HOST", turnIP)
+		if strings.ContainsAny(turnHost, ":/?#@ \t\r\n") {
+			return errors.New("FILETRANSFER_TURN_HOST must be an IPv4 address or hostname without a port")
+		}
+		publicLimit, reservedLimit := settings.limits()
+		ledger, err = prepareLedger(filepath.Join(dir, "relay-usage.json"), publicLimit, reservedLimit, time.Now)
 		if err != nil {
 			return err
 		}
 
-		router = newRelayRouter(net.ParseIP(ip), ledger)
+		router = newRelayRouter(net.ParseIP(turnIP), ledger)
 		if err := router.Validate(); err != nil {
 			return err
 		}
@@ -112,6 +127,9 @@ func run() error {
 			return err
 		}
 		defer relay.Close()
+		if err := ledger.activate(); err != nil {
+			return err
+		}
 		log.Printf("TURN listening on %s", udp.LocalAddr())
 	}
 	if list := os.Getenv("FILETRANSFER_STUN_URLS"); list != "" {
@@ -129,6 +147,9 @@ func run() error {
 		return errors.New("FILETRANSFER_RELAY_KEY must be at most 512 bytes")
 	}
 	hub := newHub(router, stunURLs, turnURLs, relayKey)
+	if settings != nil {
+		hub.applyKeyDigest(settings.values.KeyDigest)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/session", hub.serveSocket(os.Getenv("FILETRANSFER_ORIGIN")))
@@ -136,7 +157,18 @@ func run() error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.Handle("/", http.FileServer(http.Dir(dist)))
+	site := http.FileServer(http.Dir(dist))
+	if username != "" {
+		newAdmin(username, adminPassword, settings, hub, ledger).register(mux)
+		mux.Handle("/admin/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			site.ServeHTTP(w, r)
+		}))
+	} else {
+		mux.HandleFunc("/admin/", http.NotFound)
+	}
+	mux.HandleFunc("/api/admin/", http.NotFound)
+	mux.Handle("/", site)
 	server := &http.Server{
 		Addr: addr, TLSConfig: tlsConfig, Handler: browserHeaders(mux),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
@@ -156,6 +188,9 @@ func run() error {
 		for {
 			select {
 			case now := <-ticker.C:
+				if ledger != nil {
+					ledger.rollDay()
+				}
 				hub.tick(now)
 			case <-ctx.Done():
 				return
@@ -229,7 +264,7 @@ func lockDataDirectory(dir string) (*os.File, error) {
 func byteLimit(name string, fallback int64) (int64, error) {
 	raw := env(name, strconv.FormatInt(fallback, 10))
 	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 0 || n > 1<<50 {
+	if err != nil || !validQuota(n) {
 		return 0, fmt.Errorf("%s must be a nonnegative integer byte limit up to 1 PiB", name)
 	}
 	return n, nil
