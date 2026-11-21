@@ -24,9 +24,13 @@ FILETRANSFER_TURN_IP=127.0.0.1 go run .
 
 ## 用 Docker Compose 部署到单台服务器
 
-准备 Docker Engine、Docker Compose v2、域名和浏览器信任的证书。启用中继时还需要稳定的公网 IPv4。将域名的 A 记录指向服务器。Compose 在容器内构建前端和 Go 程序，由 Go 直接提供 HTTPS 和 WSS。
+准备 Docker Engine、Docker Compose 2.24.4 或更新版本、域名和浏览器信任的证书。启用中继时还需要稳定的公网 IPv4。将域名的 A 记录指向服务器。两种部署方式共用 `compose.yaml`，由 Go 提供 HTTPS 和 WSS。
 
-在 Linux 部署主机的仓库根目录执行以下命令，将证书路径换成实际的完整证书链和私钥路径。容器以 UID/GID `10001:10001` 运行。这里通过组权限让容器读取私钥和管理员密码，Compose 以只读方式挂载文件。
+### 准备部署目录
+
+本地构建需要完整源码，在仓库根目录操作。从 Docker Hub 拉取时，只需把本仓库的 `compose.yaml` 复制到服务器的部署目录，服务器无需下载源码。
+
+在 Linux 部署主机上，进入 `compose.yaml` 所在目录执行以下命令，将证书路径换成实际的完整证书链和私钥路径。容器以 UID/GID `10001:10001` 运行。这里通过组权限让容器读取私钥和管理员密码，Compose 以只读方式挂载文件。
 
 ```sh
 mkdir -p .deployment
@@ -37,7 +41,7 @@ sudo chown root:10001 .deployment/admin-password
 sudo chmod 0440 .deployment/admin-password
 ```
 
-用 `sudo cat .deployment/admin-password` 读取生成的密码并保存到密码管理器。将下列配置保存为仓库根目录的 `.env`，并替换域名、公网 IPv4 和管理员账号。`.env` 只记录密码文件路径。
+用 `sudo cat .deployment/admin-password` 读取生成的密码并保存到密码管理器。将下列配置保存为同目录的 `.env`，并替换域名、公网 IPv4 和管理员账号。`.env` 只记录密码文件路径。
 
 ```dotenv
 FILETRANSFER_ORIGIN=https://transfer.example.com
@@ -49,16 +53,45 @@ FILETRANSFER_ADMIN_USERNAME=admin
 FILETRANSFER_ADMIN_PASSWORD_PATH=./.deployment/admin-password
 ```
 
+仅使用 UDP 中继时，可以将 `FILETRANSFER_TURN_HOST` 留空，让浏览器直接访问 `FILETRANSFER_TURN_IP`。如果 Web 域名经过 Cloudflare 代理，TURN 可以使用公网 IPv4 或单独的仅 DNS 域名。
+
+### 方式一：本地构建镜像
+
+在源码仓库根目录执行以下命令。Docker 会在构建阶段编译前端和 Go 服务。如果从 Docker Hub 切回本地构建，先从 `compose.override.yaml` 移除下文的 `image` 和 `build: !reset null` 两项，或者删除仅包含这两项配置的覆盖文件。
+
 ```sh
 docker compose config --quiet
-docker compose up --build --wait
+docker compose up -d --build --wait
 ```
+
+更新源码后，重新执行启动命令即可构建并部署新镜像。
+
+### 方式二：从 Docker Hub 拉取镜像
+
+在 `compose.yaml` 同目录创建 `compose.override.yaml`。Compose 会自动读取该文件，使用公开发布的镜像。
+
+```yaml
+services:
+  filetransfer:
+    build: !reset null
+    image: docker.io/johnnyrong/filetransfer:1.1.0
+```
+
+```sh
+docker compose config --quiet
+docker compose pull filetransfer
+docker compose up -d --no-build --wait
+```
+
+示例固定使用 `1.1.0`。升级时将 `image` 改成目标版本并重新执行上述命令。也可使用 `latest` 标签，每次更新时先运行 `docker compose pull filetransfer`。在原部署上切换方式时，继续使用同一部署目录和 Compose 项目名，服务会继续使用原数据卷。
+
+### 防火墙与启动验证
 
 在防火墙开放 TCP 443。启用中继时同时开放并转发 UDP 3478，公网与容器使用相同的 TURN 端口。启动后访问站点的 `/healthz`，再到 `/admin/` 使用配置的账号和密码登录。中继密钥和额度可在后台设置，保存的设置优先于环境变量中的初始值。
 
 ### 启用 TURN TLS
 
-TURN TLS 是额外的 TCP 入口，启用后仍需保留 UDP 3478。将以下内容保存为 `compose.override.yaml`，确保 `FILETRANSFER_TURN_HOST` 是站点证书覆盖的域名，在防火墙开放 TCP 5349，再运行 `docker compose up -d`。Go 共用站点证书。
+TURN TLS 是额外的 TCP 入口，启用后仍需保留 UDP 3478。将以下内容加入 `compose.override.yaml`。如果已用该文件配置 Docker Hub 镜像，将 `environment` 和 `ports` 加到已有的 `services.filetransfer` 下。确保 `FILETRANSFER_TURN_HOST` 是站点证书覆盖且可直连的域名，在防火墙开放 TCP 5349，再运行 `docker compose up -d`。Go 共用站点证书。
 
 ```yaml
 services:
@@ -69,7 +102,7 @@ services:
       - "5349:5349/tcp"
 ```
 
-删除该覆盖文件并再次运行 `docker compose up -d` 可关闭 TURN TLS。将 `.env` 中的 `FILETRANSFER_TURN_IP` 设为空并重建容器可关闭整个 TURN 服务。关闭后可在防火墙关闭 TURN 端口，基础 Compose 文件仍声明 UDP 3478 的端口映射。重新填入公网 IPv4 并重建容器即可启用。
+从覆盖文件移除 `FILETRANSFER_TURN_TLS_ADDR` 和 `5349:5349/tcp` 映射，再次运行 `docker compose up -d` 可关闭 TURN TLS。将 `.env` 中的 `FILETRANSFER_TURN_IP` 设为空并重建容器可关闭整个 TURN 服务。关闭后可在防火墙关闭 TURN 端口，基础 Compose 文件仍声明 UDP 3478 的端口映射。重新填入公网 IPv4 并重建容器即可启用。
 
 ### 密码、证书与数据卷
 
@@ -84,11 +117,10 @@ docker compose stop filetransfer
 docker compose start filetransfer
 ```
 
-恢复时，停止原服务，使用一个尚未使用的 Compose 项目名创建空数据卷。还原成功后启动该项目，后续操作继续使用同一个 `-p` 参数。原有数据卷保留，避免运行 `docker compose down -v` 删除持久数据。
+恢复时，停止原服务，使用一个尚未使用的 Compose 项目名创建空数据卷。本地构建方式先运行 `docker compose -p filetransfer-restored build filetransfer`，Docker Hub 方式先运行 `docker compose -p filetransfer-restored pull filetransfer`。还原成功后启动该项目，后续操作继续使用同一个 `-p` 参数。原有数据卷保留，避免运行 `docker compose down -v` 删除持久数据。
 
 ```sh
 docker compose stop filetransfer
-docker compose -p filetransfer-restored build filetransfer
 docker compose -p filetransfer-restored run --rm --no-deps -T --entrypoint tar filetransfer \
   -C /var/lib/filetransfer -xzf - < .deployment/filetransfer-data.tar.gz
 docker compose -p filetransfer-restored up -d --wait
