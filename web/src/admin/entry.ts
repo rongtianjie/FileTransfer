@@ -3,8 +3,14 @@ import { adminLogin, AdminError } from './model.ts'
 export function mountAdminEntry(container: HTMLElement) {
   container.hidden = true
   container.innerHTML = `
-    <button class="admin-entry-action" type="button" aria-haspopup="dialog">登录</button>
-    <a class="admin-entry-action" href="/admin/" hidden>配置</a>
+    <button class="admin-entry-action tip-trigger" type="button" aria-haspopup="dialog">
+      <span>管理后台</span>
+      <span class="tip-bubble" role="tooltip">登录并管理中继配额</span>
+    </button>
+    <a class="admin-entry-action tip-trigger" href="/admin/" hidden>
+      <span>中继配置</span>
+      <span class="tip-bubble" role="tooltip">查看流量概览与调整配置</span>
+    </a>
     <dialog class="admin-login" aria-labelledby="home-admin-title">
       <form method="dialog">
         <h2 id="home-admin-title">管理员登录</h2>

@@ -1,8 +1,8 @@
 import { seriesRuns, type HistoryDay } from './model.ts'
 
 const series = [
-  { field: 'public', color: '#2456bd', dash: [] },
-  { field: 'reserved', color: '#8a3e82', dash: [4, 4] },
+  { field: 'public', lightColor: '#2456bd', darkColor: '#5287f4', dash: [] },
+  { field: 'reserved', lightColor: '#8a3e82', darkColor: '#c26db7', dash: [4, 4] },
 ] as const
 
 const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
@@ -44,11 +44,13 @@ export function drawTraffic(canvas: HTMLCanvasElement, history: HistoryDay[], se
   const step = Math.max(1, 2 ** Math.ceil(Math.log2(largest / 4)))
   const ticks = largest ? 4 : 0
   const y = (bytes: number) => bottom - bytes * (bottom - top) / (step * 4)
+
+  const isDark = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
   ctx.font = '12px system-ui'
   ctx.textBaseline = 'middle'
   ctx.textAlign = 'right'
-  ctx.fillStyle = '#4b5973'
-  ctx.strokeStyle = '#dbe3ef'
+  ctx.fillStyle = isDark ? '#8a9bb5' : '#4b5973'
+  ctx.strokeStyle = isDark ? '#202d45' : '#dbe3ef'
   for (let tick = 0; tick <= ticks; tick++) {
     const bytes = tick * step
     const lineY = y(bytes)
@@ -66,13 +68,15 @@ export function drawTraffic(canvas: HTMLCanvasElement, history: HistoryDay[], se
     ctx.fillText(history[index].day.slice(5), x(index), bottom + 17)
   }
 
-  ctx.strokeStyle = '#788cae'
+  ctx.strokeStyle = isDark ? '#4b6187' : '#788cae'
   ctx.beginPath()
   ctx.moveTo(x(selected), top)
   ctx.lineTo(x(selected), bottom)
   ctx.stroke()
 
-  for (const { field, color, dash } of series) {
+  for (const item of series) {
+    const { field, dash } = item
+    const color = isDark ? item.darkColor : item.lightColor
     ctx.strokeStyle = color
     ctx.fillStyle = color
     const runs = seriesRuns(history.map(day => day[field]))

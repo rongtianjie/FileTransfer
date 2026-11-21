@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#172746">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#172746">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c1320">
     <meta name="robots" content="noindex">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
     <title>直达 · 管理后台</title>
@@ -11,7 +13,7 @@
   <body>
     <header class="top">
       <div class="frame top-inner">
-        <a class="brand" href="/" aria-label="直达传输首页">
+        <a class="brand" href="/" aria-label="返回直达传输首页">
           <span class="mark" aria-hidden="true"></span>直达
         </a>
         <span class="top-label">管理后台</span>
@@ -54,14 +56,19 @@
         </section>
         <section class="panel history-panel" id="history" aria-labelledby="history-title">
           <div class="heading">
-            <h2 id="history-title">中继流量趋势</h2>
+            <div class="heading-group">
+              <h2 id="history-title">中继流量趋势</h2>
+              <span class="tip-trigger" tabindex="0" role="button" aria-label="流量统计说明">
+                <span class="help-icon" aria-hidden="true">?</span>
+                <span class="tip-bubble" role="tooltip">按结算日期统计额度消耗，包含传输数据、协议开销及重传流量。</span>
+              </span>
+            </div>
             <div id="range" class="range" role="group" aria-label="流量周期">
               <button type="button" data-days="7" aria-pressed="false">7 天</button>
               <button type="button" data-days="30" aria-pressed="true">30 天</button>
               <button type="button" data-days="90" aria-pressed="false">90 天</button>
             </div>
           </div>
-          <p class="muted">按结算日期统计额度消耗，含协议开销和重传。</p>
           <p class="notice" id="history-status" role="status"></p>
           <div id="plot" hidden>
             <ul class="legend" aria-label="图例">
@@ -94,26 +101,39 @@
               <div><dt>直连就绪</dt><dd id="rooms-direct"></dd></div>
               <div><dt>中继就绪</dt><dd id="rooms-relay"></dd></div>
             </dl>
-            <h3>失败原因（本次运行）</h3>
+            <h3>连接异常记录（本次运行）</h3>
             <dl class="failures" id="failures"></dl>
-            <p class="muted" id="no-failures">暂无失败记录。</p>
+            <p class="muted" id="no-failures">本次运行暂无异常记录。</p>
           </section>
           <section class="panel settings-panel" id="settings" aria-labelledby="settings-title">
-            <h2 id="settings-title">中继设置</h2>
-            <p class="muted" id="limit-help">每日额度按字节填写，每池最多 1 PiB。</p>
+            <div class="heading">
+              <div class="heading-group">
+                <h2 id="settings-title">中继设置</h2>
+                <span class="tip-trigger" tabindex="0" role="button" aria-label="配额设置说明">
+                  <span class="help-icon" aria-hidden="true">?</span>
+                  <span class="tip-bubble" id="limit-help" role="tooltip">每日配额按字节为单位填写，每池上限最高为 1 PiB（1,125,899,906,842,624 字节）。</span>
+                </span>
+              </div>
+            </div>
             <form id="settings-form">
               <div class="limit-fields">
                 <div>
                   <label for="public-limit">公共额度（字节）</label>
-                  <input id="public-limit" inputmode="numeric" aria-describedby="limit-help" required>
+                  <input id="public-limit" inputmode="numeric" placeholder="例如：10737418240" aria-describedby="limit-help" required>
                 </div>
                 <div>
                   <label for="reserved-limit">保留额度（字节）</label>
-                  <input id="reserved-limit" inputmode="numeric" aria-describedby="limit-help" required>
+                  <input id="reserved-limit" inputmode="numeric" placeholder="例如：53687091200" aria-describedby="limit-help" required>
                 </div>
               </div>
               <div class="key-fields">
-                <label for="key-action">中继密钥</label>
+                <div class="field-label">
+                  <label for="key-action">中继密钥</label>
+                  <span class="tip-trigger" tabindex="0" role="button" aria-label="中继密钥说明">
+                    <span class="help-icon" aria-hidden="true">?</span>
+                    <span class="tip-bubble" role="tooltip">客户端输入该密钥后，方可使用保留额度池继续传输。</span>
+                  </span>
+                </div>
                 <p class="muted" id="key-state"></p>
                 <select id="key-action" aria-describedby="key-state">
                   <option value="keep">保留现状</option>
@@ -122,14 +142,20 @@
                 </select>
                 <div id="new-key-field" hidden>
                   <label for="new-key">新中继密钥</label>
-                  <input id="new-key" type="password" autocomplete="new-password" disabled>
+                  <input id="new-key" type="password" autocomplete="new-password" placeholder="请输入新中继密钥" disabled>
                 </div>
               </div>
               <button class="primary" id="save">保存设置</button>
             </form>
             <p class="notice" id="settings-status" role="status"></p>
             <section class="settlement-settings" aria-labelledby="settlement-title">
-              <h3 id="settlement-title">结算时区</h3>
+              <div class="field-label">
+                <h3 id="settlement-title">结算时区</h3>
+                <span class="tip-trigger" tabindex="0" role="button" aria-label="时区说明">
+                  <span class="help-icon" aria-hidden="true">?</span>
+                  <span class="tip-bubble" role="tooltip">每日额度重置与历史统计所采用的时区，调整后将于次日生效。</span>
+                </span>
+              </div>
               <p class="muted" id="settlement-current"></p>
               <p class="muted" id="settlement-pending" hidden></p>
               <div class="settlement-actions">

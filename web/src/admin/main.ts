@@ -326,6 +326,9 @@ chart.addEventListener('click', event => {
   renderSelection()
 })
 new ResizeObserver(renderSelection).observe(chart)
+if (window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderSelection)
+}
 
 settingsForm.addEventListener('input', () => { configDirty = true })
 keyAction.addEventListener('change', updateKeyField)
