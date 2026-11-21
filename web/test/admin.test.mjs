@@ -32,11 +32,15 @@ test('quota inputs accept decimal MB and GB without losing byte precision', () =
   }
 })
 
-test('traffic uses decimal MB and GB and keeps tiny nonzero amounts visible', () => {
-  assert.equal(formatBytes(0), '0 MB')
-  assert.equal(formatBytes(1), '0.000001 MB')
+test('traffic uses at most one decimal place and keeps tiny amounts visible', () => {
+  assert.equal(formatBytes(0), '0 B')
+  assert.equal(formatBytes(1), '1 B')
+  assert.equal(formatBytes(12345), '12.3 kB')
+  assert.equal(formatBytes(100000000), '100 MB')
+  assert.equal(formatBytes(123456789), '123.5 MB')
   assert.equal(formatBytes(500000000), '500 MB')
   assert.equal(formatBytes(1000000000), '1 GB')
+  assert.equal(formatBytes(1234567890), '1.2 GB')
   assert.equal(formatBytes(20000000000), '20 GB')
   assert.equal(formatBytes(null), '无数据')
 })

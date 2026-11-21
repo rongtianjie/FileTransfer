@@ -1,19 +1,15 @@
-import { quotaUnit, seriesRuns, type HistoryDay } from './model.ts'
+import { formatByteSize } from '../byte-size.ts'
+import { seriesRuns, type HistoryDay } from './model.ts'
 
 const series = [
   { field: 'public', lightColor: '#2456bd', darkColor: '#5287f4', dash: [] },
   { field: 'reserved', lightColor: '#8a3e82', darkColor: '#c26db7', dash: [4, 4] },
 ] as const
 
-const short = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
-const small = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 })
 const integer = new Intl.NumberFormat('zh-CN')
 
 export function formatBytes(bytes: number | null) {
-  if (bytes === null) return '无数据'
-  const { unit, digits } = quotaUnit(bytes)
-  const amount = bytes / 10 ** digits
-  return `${(amount < 1 ? small : short).format(amount)} ${unit}`
+  return bytes === null ? '无数据' : formatByteSize(bytes)
 }
 
 export function exactBytes(bytes: number | null) {

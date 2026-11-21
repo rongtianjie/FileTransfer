@@ -2,6 +2,7 @@ import './style.css'
 import { Session } from './session.ts'
 import type { Transfer } from './transfer.ts'
 import { mountAdminEntry } from './admin/entry.ts'
+import { formatByteSize } from './byte-size.ts'
 
 type PickerWindow = Window & {
   showSaveFilePicker?: (options: { suggestedName: string }) => Promise<FileSystemFileHandle>
@@ -100,13 +101,6 @@ let saveMarkup = ''
 let lastTransferPhase = ''
 let scheduled = false
 
-function bytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`
-  return `${(value / 1024 ** 3).toFixed(2)} GiB`
-}
-
 function html(value: string) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
 }
@@ -148,7 +142,7 @@ function transferMarkup() {
         <h2 id="transfer-title">${phase === 'idle' ? '传输文件' : phases[phase]}</h2>
         ${free || disabled ? `<button class="primary" type="button" data-action="select" ${blocked}>选择文件</button>` : ''}
       </div>
-      ${view?.name ? `<p class="file-name"><bdi>${html(view.name)}</bdi><span>${bytes(view.size)}</span></p>` : ''}
+      ${view?.name ? `<p class="file-name"><bdi>${html(view.name)}</bdi><span>${formatByteSize(view.size)}</span></p>` : ''}
       ${progress ? '<div class="progress"><progress id="progress" aria-label="已写入的字节数" max="1" value="0"></progress><span id="progress-text"></span></div>' : ''}
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
       ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
@@ -188,7 +182,7 @@ function relayMarkup() {
             <span class="tip-trigger" tabindex="0" aria-describedby="key-tip">
               <span class="sr-only">中继密钥说明</span>
               <span class="help-icon" aria-hidden="true">?</span>
-              <span id="key-tip" class="tip-bubble" role="tooltip">由中继服务管理员提供，用于解除公用中继流量限制。</span>
+              <span id="key-tip" class="tip-bubble" role="tooltip">房主需输入管理员设置的中继密钥，才能为此房间使用保留额度。管理员登录仅用于管理配置。</span>
             </span>
           </div>
           <div class="button-row">
@@ -325,8 +319,8 @@ function draw() {
   setText('copy-feedback', copyMessage)
   if (find('relay-balance')) {
     const remaining = session.remaining
-    setText('relay-balance', (session.authorized ? '专属额度' : '中继余量') +
-      (remaining === undefined ? '' : ` ${bytes(Math.max(0, remaining))}`))
+    setText('relay-balance', (session.authorized ? '专属中继余量' : '免密中继余量') +
+      (remaining === undefined ? '' : ` ${formatByteSize(Math.max(0, remaining))}`))
   }
   const view = session.transfer?.view
   const progress = find<HTMLProgressElement>('progress')
@@ -334,7 +328,7 @@ function draw() {
     progress.max = view.size || 1
     progress.value = view.size ? view.bytes : view.phase === 'done' ? 1 : 0
     const percent = view.size ? Math.min(100, Math.round((view.bytes / view.size) * 100)) : (view.phase === 'done' ? 100 : 0)
-    setText('progress-text', `已写入 ${bytes(view.bytes)} / ${bytes(view.size)} (${percent}%)`)
+    setText('progress-text', `已写入 ${formatByteSize(view.bytes)} / ${formatByteSize(view.size)} (${percent}%)`)
   }
   const transferPhase = view?.phase ?? ''
   if (transferPhase !== lastTransferPhase) {
