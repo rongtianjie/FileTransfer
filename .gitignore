@@ -3,3 +3,5 @@
 /filetransfer
 .env
 .env.*
+/.deployment/
+/compose.override.yaml
