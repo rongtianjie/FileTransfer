@@ -40,6 +40,7 @@ type relayGrant struct {
 	expires    time.Time
 	revoked    bool
 	reason     string
+	queued     int
 	users      [2]string
 }
 
@@ -126,30 +127,40 @@ func (r *relayRouter) revoke(grant *relayGrant) {
 }
 
 func relayActive(grant *relayGrant) bool {
-	return !grant.revoked && grant.reason == "" && time.Now().Before(grant.expires)
+	return grant.reason == "" && relayLive(grant)
+}
+
+func relayLive(grant *relayGrant) bool {
+	return !grant.revoked && time.Now().Before(grant.expires)
 }
 
 func (r *relayRouter) status(account *relayAccount, grant *relayGrant, authorized bool) (int64, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	remaining := r.ledger.remaining(authorized)
+	remaining, available := r.ledger.balance(authorized)
 	if !authorized {
 		remaining = min(remaining, account.limit-account.used)
 	}
-	if grant == nil {
-		if !authorized && account.used >= account.limit {
-			return 0, "session_quota"
+	if grant != nil {
+		if !time.Now().Before(grant.expires) {
+			return remaining, "relay_expired"
 		}
-		if remaining <= 0 {
-			return 0, "global_quota"
+		// Publishing a terminal quota reason makes signaling revoke the grant.
+		if !grant.revoked && grant.queued > 0 && (grant.reason == "session_quota" || grant.reason == "global_quota") {
+			return remaining, ""
 		}
-		return remaining, ""
 	}
-	if grant.reason != "" {
+	if !available {
+		return 0, "ledger_unavailable"
+	}
+	if grant != nil {
 		return remaining, grant.reason
 	}
-	if !time.Now().Before(grant.expires) {
-		return remaining, "relay_expired"
+	if !authorized && account.used >= account.limit {
+		return 0, "session_quota"
+	}
+	if remaining <= 0 {
+		return 0, "global_quota"
 	}
 	return remaining, ""
 }
@@ -244,19 +255,32 @@ func (s *relaySocket) WriteTo(data []byte, addr net.Addr) (int, error) {
 	}
 
 	count := int64(len(data))
-	charged := r.ledger.charge(count, grant.authorized)
+	ledger := r.ledger
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	public, reserved, err := ledger.reserveLocked(count, grant.authorized)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !charged {
-		grant.reason = "global_quota"
-		return 0, errGlobalQuota
-	}
 	if s.closed || dst.closed || !relayActive(grant) {
+		if err == nil {
+			ledger.publish()
+		}
 		return 0, errRelayPeer
 	}
+	switch err {
+	case errGlobalQuota:
+		grant.reason = "global_quota"
+	case errLedgerUnavailable:
+		grant.reason = "ledger_unavailable"
+	}
+	if err != nil {
+		return 0, err
+	}
+	ledger.spendLocked(public, reserved)
 	if !grant.authorized {
 		grant.account.used += count
 	}
+	grant.queued++
 	dst.packets <- relayPacket{data: append([]byte(nil), data...), source: s.address}
 	return len(data), nil
 }
@@ -288,7 +312,9 @@ func (s *relaySocket) ReadFrom(buf []byte) (int, net.Addr, error) {
 	case packet := <-s.packets:
 		s.router.mu.Lock()
 		defer s.router.mu.Unlock()
-		if s.closed || !relayActive(s.credential.grant) {
+		grant := s.credential.grant
+		grant.queued--
+		if s.closed || !relayLive(grant) {
 			return 0, nil, net.ErrClosed
 		}
 		return copy(buf, packet.data), packet.source, nil
@@ -305,6 +331,14 @@ func (s *relaySocket) closeLocked() {
 		s.credential.allocations--
 	}
 	close(s.done)
+	for {
+		select {
+		case <-s.packets:
+			s.credential.grant.queued--
+		default:
+			return
+		}
+	}
 }
 
 func (s *relaySocket) Close() error {

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http/httptest"
 	"path/filepath"
@@ -120,8 +121,10 @@ func assertNoDatagram(t *testing.T, conn net.PacketConn) {
 	if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := conn.ReadFrom(make([]byte, 20)); err == nil {
-		t.Fatal("read datagram that should have been dropped")
+	n, from, err := conn.ReadFrom(make([]byte, 20))
+	var timeout net.Error
+	if n != 0 || from != nil || !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("expected a read timeout with no datagram, got %d bytes from %v: %v", n, from, err)
 	}
 }
 

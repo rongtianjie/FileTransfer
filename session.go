@@ -477,6 +477,8 @@ func failureMessage(reason string) string {
 		return "免密中继额度已用完。可由发起方输入密钥后重试。"
 	case "global_quota":
 		return "当前可用的每日中继额度已用完。"
+	case "ledger_unavailable":
+		return "中继流量账本暂不可用，请稍后重试或联系管理员。"
 	case "relay_expired":
 		return "本次中继授权已过期，请重新连接。"
 	default:

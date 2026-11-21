@@ -17,6 +17,8 @@ const (
 	historyDays           = 90
 )
 
+var errLedgerUnavailable = errors.New("relay quota ledger unavailable")
+
 type dailyUsage struct {
 	Day      string `json:"day"`
 	TimeZone string `json:"timeZone,omitempty"`
@@ -266,20 +268,25 @@ func (l *dailyLedger) rollDay() {
 	l.publish()
 }
 
-// Signaling reads an advisory snapshot without waiting on a disk sync.
 func (l *dailyLedger) remaining(authorized bool) int64 {
+	remaining, _ := l.balance(authorized)
+	return remaining
+}
+
+// Signaling reads an advisory snapshot without waiting on a disk sync.
+func (l *dailyLedger) balance(authorized bool) (int64, bool) {
 	current := l.last.Load()
 	if current.failed {
-		return 0
+		return 0, false
 	}
 	public, reserved := current.public, current.reserved
 	if dayDue(l.now(), current.day, current.zone, current.switchAt) {
 		public, reserved = current.publicLimit, current.reserveLimit
 	}
 	if authorized {
-		return public + reserved
+		return public + reserved, true
 	}
-	return public
+	return public, true
 }
 
 func (l *dailyLedger) publish() {
@@ -305,6 +312,17 @@ func (l *dailyLedger) available() (int64, int64) {
 func (l *dailyLedger) charge(n int64, authorized bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	public, reserved, err := l.reserveLocked(n, authorized)
+	if err != nil {
+		return false
+	}
+	l.spendLocked(public, reserved)
+	return true
+}
+
+// Keep mu held from reservation through admission so settlement and settings
+// changes cannot intervene. Unspent reservations remain available as credit.
+func (l *dailyLedger) reserveLocked(n int64, authorized bool) (int64, int64, error) {
 	l.advanceDay(l.now())
 	public, reserved := l.available()
 	limit := public
@@ -316,7 +334,10 @@ func (l *dailyLedger) charge(n int64, authorized bool) bool {
 			l.persistPending()
 			l.publish()
 		}
-		return false
+		if l.blocked() {
+			return 0, 0, errLedgerUnavailable
+		}
+		return 0, 0, errGlobalQuota
 	}
 	public = min(n, public)
 	reserved = n - public
@@ -329,12 +350,15 @@ func (l *dailyLedger) charge(n int64, authorized bool) bool {
 	l.reserveCredit += reservedBlock
 	if !l.persistPending() {
 		l.publish()
-		return false
+		return 0, 0, errLedgerUnavailable
 	}
+	return public, reserved, nil
+}
+
+func (l *dailyLedger) spendLocked(public, reserved int64) {
 	l.publicCredit -= public
 	l.reserveCredit -= reserved
 	l.publish()
-	return true
 }
 
 func (l *dailyLedger) persistPending() bool {
