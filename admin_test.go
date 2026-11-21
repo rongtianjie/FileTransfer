@@ -32,6 +32,9 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 	}
 	const origin = "https://transfer.test"
 	const credentials = `{"username":"ops","password":"strong-password"}`
+	if res := request("GET", "/api/admin/session", "", "", nil); res.Code != 401 || res.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unauthenticated session probe: %d %v", res.Code, res.Header())
+	}
 	if res := request("GET", "/api/admin/dashboard", "", "", nil); res.Code != 401 {
 		t.Fatalf("unauthenticated dashboard: %d", res.Code)
 	}
@@ -46,6 +49,9 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 		t.Fatalf("login: %d %s", login.Code, login.Body)
 	}
 	cookie := login.Result().Cookies()[0]
+	if res := request("GET", "/api/admin/session", "", "", cookie); res.Code != 204 || res.Body.Len() != 0 {
+		t.Fatalf("authenticated session probe: %d %s", res.Code, res.Body)
+	}
 	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteStrictMode {
 		t.Fatal("admin cookie flags missing")
 	}
@@ -61,6 +67,9 @@ func TestAdminLoginLogoutAndSameOrigin(t *testing.T) {
 	}
 	if res := request("POST", "/api/admin/logout", origin, "", cookie); res.Code != 204 {
 		t.Fatalf("logout: %d", res.Code)
+	}
+	if res := request("GET", "/api/admin/session", "", "", cookie); res.Code != 401 {
+		t.Fatalf("logged out session probe: %d", res.Code)
 	}
 	if res := request("GET", "/api/admin/dashboard", "", "", cookie); res.Code != 401 {
 		t.Fatalf("logged out cookie accepted: %d", res.Code)

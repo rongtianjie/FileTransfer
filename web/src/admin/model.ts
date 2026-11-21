@@ -59,3 +59,11 @@ export async function adminRequest<T>(request: Promise<Response>): Promise<T> {
     typeof body?.error === 'string' && body.error ? body.error : `请求失败（HTTP ${response.status}）。`,
   )
 }
+
+export function adminLogin(username: string, password: string) {
+  return adminRequest<void>(fetch('/api/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  }))
+}

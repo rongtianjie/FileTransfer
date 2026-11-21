@@ -25,6 +25,38 @@ h2 { font-weight: 650; font-size: 1.26rem; line-height: 1.4; }
 .frame { width: min(100% - 3rem, 52.5rem); margin-inline: auto; }
 .top { border-bottom: 1px solid #dce3ef; }
 .bar { display: flex; justify-content: space-between; align-items: center; min-height: 66px; gap: 1em; }
+.bar-end { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .2rem clamp(.5rem, 2vw, 1rem); }
+.admin-entry-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: .35rem .65rem;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: .86rem;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.admin-entry-action:hover { background: var(--well); }
+.admin-entry-action:focus-visible { outline: 3px solid #566de3; outline-offset: 2px; }
+.admin-login {
+  width: min(calc(100% - 2rem), 24rem);
+  padding: clamp(1rem, 5vw, 1.6rem);
+  color: var(--ink);
+  background: var(--white);
+  border: 1px solid #cdd8ec;
+  border-radius: 12px;
+  box-shadow: 0 14px 36px #20294122;
+}
+.admin-login::backdrop { background: #20294160; }
+.admin-login form { display: grid; gap: .55rem; }
+.admin-login label:first-of-type { margin-top: .4rem; }
+.admin-login-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; margin-top: .6rem; }
+.admin-login .notice { margin-top: .3rem; }
 .brand { display: inline-flex; align-items: center; gap: .64rem; font-weight: 750; letter-spacing: .09em; }
 .mark { position: relative; display: inline-block; width: 21px; height: 20px; color: var(--accent); }
 .mark i { position: absolute; inset: 3px 8px 7px 0; border: 2px solid currentColor; border-radius: 3px; }

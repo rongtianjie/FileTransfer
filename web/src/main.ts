@@ -1,6 +1,7 @@
 import './style.css'
 import { Session } from './session.ts'
 import { MAX_FILE } from './transfer.ts'
+import { mountAdminEntry } from './admin/entry.ts'
 
 type PickerWindow = Window & {
   showSaveFilePicker?: (options: { suggestedName: string }) => Promise<FileSystemFileHandle>
@@ -19,7 +20,10 @@ const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
   <header class="top"><div class="frame bar">
     <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i></span>直达</div>
-    <div class="socket"><span class="dot" aria-hidden="true"></span><span id="socket-label"></span></div>
+    <div class="bar-end">
+      <div class="socket"><span class="dot" aria-hidden="true"></span><span id="socket-label"></span></div>
+      <div id="admin-entry"></div>
+    </div>
   </div></header>
   <main class="frame">
     <section class="intro" aria-labelledby="title">
@@ -60,6 +64,7 @@ app.innerHTML = `
 `
 
 const find = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
+mountAdminEntry(find('admin-entry'))
 const home = find('home')
 const room = find('room')
 const fileInput = find<HTMLInputElement>('file-input')

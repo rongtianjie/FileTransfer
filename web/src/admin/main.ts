@@ -1,5 +1,5 @@
 import './style.css'
-import { AdminError, adminRequest, configPayload, type Dashboard, type HistoryDay, type KeyAction, type Quota } from './model.ts'
+import { adminLogin, AdminError, adminRequest, configPayload, type Dashboard, type HistoryDay, type KeyAction, type Quota } from './model.ts'
 import { chartGeometry, drawTraffic, exactBytes, formatBytes } from './traffic.ts'
 
 function element<T extends HTMLElement = HTMLElement>(id: string) {
@@ -225,7 +225,7 @@ loginForm.addEventListener('submit', event => {
     password.readOnly = true
     username.readOnly = true
     try {
-      await write('POST', 'login', { username: username.value, password: password.value })
+      await adminLogin(username.value, password.value)
       loginStatus.textContent = ''
       loginView.hidden = true
       await openDashboard(true)

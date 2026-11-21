@@ -67,6 +67,9 @@ func newAdmin(username, password string, settings *adminSettings, h *hub, ledger
 func (a *admin) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/login", a.guard(false, a.login))
 	mux.HandleFunc("POST /api/admin/logout", a.guard(true, a.logout))
+	mux.HandleFunc("GET /api/admin/session", a.guard(true, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
 	mux.HandleFunc("GET /api/admin/dashboard", a.guard(true, a.dashboard))
 	mux.HandleFunc("PUT /api/admin/config", a.guard(true, a.configure))
 }
