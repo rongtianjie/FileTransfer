@@ -3,6 +3,10 @@ import { Session } from './session.ts'
 import type { Transfer } from './transfer.ts'
 import { mountAdminEntry } from './admin/entry.ts'
 import { formatByteSize } from './byte-size.ts'
+import {
+  MEMORY_LIMIT, clearStaleReceived, detectReceiveMode, memoryWriter, opfsWriter, receiveLimit, saveToDevice,
+  type Received,
+} from './receive.ts'
 import { SpeedMeter, formatSpeed } from './speed.ts'
 
 type PickerWindow = Window & {
@@ -37,9 +41,19 @@ async function createInFolder(folder: FileSystemDirectoryHandle, wanted: string)
 
 const picker = (window as PickerWindow).showSaveFilePicker
 const folderPicker = (window as PickerWindow).showDirectoryPicker
-// Receiving needs streaming saves (desktop Chromium). Sending works wherever WebRTC does.
-const canReceive = Boolean(picker) && window.isSecureContext
+const receiveMode = detectReceiveMode({
+  picker: Boolean(picker),
+  opfs: window.isSecureContext && typeof navigator.storage?.getDirectory === 'function' &&
+    typeof FileSystemFileHandle !== 'undefined' && 'createWritable' in FileSystemFileHandle.prototype,
+})
 const supportIssue = !window.RTCPeerConnection ? '当前浏览器不支持 WebRTC，无法使用本服务。' : ''
+
+const storageLabel = { picker: '极速流式落盘', opfs: '分块暂存后保存', memory: '内存接收' }[receiveMode]
+const storageTip = {
+  picker: '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。',
+  opfs: '此浏览器不能直接写入你选择的位置。文件会先分块暂存到浏览器存储，接收完成后点击“保存到设备”。',
+  memory: `此浏览器只能在内存中接收，单个文件最大 ${MEMORY_LIMIT / 1024 / 1024} MiB。更大的文件请使用桌面版 Chrome 或 Edge 接收。`,
+}[receiveMode]
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
@@ -102,7 +116,7 @@ app.innerHTML = `
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="signup-tip">无需注册<span id="signup-tip" class="tip-bubble" role="tooltip">开箱即用，无需登录或绑定个人账号，保障数据隐私。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="size-tip">支持大文件传输<span id="size-tip" class="tip-bubble" role="tooltip">普通房间单文件支持高达 2 GiB。有管理员登录的房间不设单文件上限。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="encryption-tip">端到端加密<span id="encryption-tip" class="tip-bubble" role="tooltip">基于 WebRTC 原生 DTLS/SCTP 加密协议，传输数据不经第三方留存。</span></span>
-      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${canReceive ? '极速流式落盘' : '仅可发送文件'}<span id="storage-tip" class="tip-bubble" role="tooltip">${canReceive ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : window.isSecureContext ? '当前浏览器不支持流式保存，只能发送文件。需要接收文件时，请使用桌面版 Chrome 或 Edge。' : '请通过 HTTPS 或 localhost 打开，才能接收文件。当前只能发送文件。'}</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${storageLabel}<span id="storage-tip" class="tip-bubble" role="tooltip">${storageTip}</span></span>
     </footer>
   </main>
   <input id="file-input" type="file" multiple hidden>
@@ -117,7 +131,7 @@ const room = find('room')
 const fileInput = find<HTMLInputElement>('file-input')
 const session = new Session(render)
 session.autoReconnect = true
-session.receiveSupported = canReceive
+session.receiveLimit = () => receiveLimit(receiveMode)
 const speed = new SpeedMeter()
 let speedTransfer: Transfer | undefined
 const baseTitle = document.title
@@ -131,6 +145,9 @@ let saveMarkup = ''
 let lastTransferPhase = ''
 let lastRequest: string | undefined
 let qrLink = ''
+type Held = Received & { id: number; saved: boolean }
+const held: Held[] = []
+let heldId = 0
 let qrSvg = ''
 let scheduled = false
 
@@ -170,6 +187,15 @@ const phases: Record<string, string> = {
   stopped: '传输已停止',
 }
 
+function acceptButton(batch: number | undefined) {
+  if (receiveMode !== 'picker') {
+    return `<button class="primary" type="button" data-action="save-local">${batch ? `接收 ${batch} 个文件` : '接收文件'}</button>`
+  }
+  return batch && folderPicker
+    ? `<button class="primary" type="button" data-action="save-batch">选择文件夹并接收 ${batch} 个文件</button>`
+    : '<button class="primary" type="button" data-action="save">选择位置并接收</button>'
+}
+
 function transferMarkup() {
   const transfer = session.transfer
   const view = transfer?.view
@@ -189,10 +215,7 @@ function transferMarkup() {
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
       ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
       ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送，可一次选择多个；双方任意一台设备均可发起传输。</p>' : ''}
-      ${phase === 'idle' && !canReceive ? '<p class="muted">此浏览器只能发送文件，无法接收。</p>' : ''}
-      ${phase === 'offered' ? `<div class="button-row">${view?.batchTotal && folderPicker
-        ? `<button class="primary" type="button" data-action="save-batch">选择文件夹并接收 ${view.batchTotal} 个文件</button>`
-        : '<button class="primary" type="button" data-action="save">选择位置并接收</button>'}<button class="secondary" type="button" data-action="cancel">拒收</button></div>` : ''}
+      ${phase === 'offered' ? `<div class="button-row">${acceptButton(view?.batchTotal)}<button class="secondary" type="button" data-action="cancel">拒收</button></div>${receiveMode === 'picker' ? '' : '<p class="muted">文件会先暂存在浏览器中，接收完成后点击“保存到设备”。</p>'}` : ''}
       ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
       ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
     </section>
@@ -423,6 +446,7 @@ function draw() {
   const remoteResult = unknown && view?.phase !== 'unconfirmed' ? unknown : undefined
   const saves = `
     ${remoteResult ? saveNotice('dismiss-unconfirmed', remoteResult.name, remoteResult.message) : ''}
+    ${heldMarkup()}
     ${waitingSave ? `<p class="notice">${waitingSave}</p>` : ''}
     ${detached ? saveNotice('dismiss-detached', detached.name, localResult) : ''}`
   if (saves !== saveMarkup) {
@@ -432,6 +456,7 @@ function draw() {
       remoteResult && `${remoteResult.name} ${remoteResult.message}`,
       waitingSave,
       detached && `${detached.name} ${localResult}`,
+      held.length && `已接收 ${held.length} 个文件，请保存到设备。`,
     ].filter(Boolean).join(' '))
   }
 
@@ -439,6 +464,51 @@ function draw() {
   const message = supportIssue || session.message || (session.busy && idle ? '正在处理房间请求…' : '')
   if (notice.textContent !== message) notice.textContent = message
   notice.hidden = !message
+}
+
+function heldMarkup() {
+  if (!held.length) return ''
+  const all = held.length > 1 ? '<div class="button-row"><button class="primary" type="button" data-action="save-all">全部保存到设备</button></div>' : ''
+  const rows = held.map(file => `
+    <div class="notice save-notice">
+      <p><bdi>${html(file.name)}</bdi> · ${formatByteSize(file.size)} · ${file.saved ? '已保存，可关闭此提示' : '已接收，点击保存到设备'}</p>
+      <div class="button-row compact">
+        <button class="primary" type="button" data-action="save-file" data-id="${file.id}">${file.saved ? '再次保存' : '保存到设备'}</button>
+        <button class="plain" type="button" data-action="drop-file" data-id="${file.id}">${file.saved ? '关闭' : '丢弃'}</button>
+      </div>
+    </div>`).join('')
+  return all + rows
+}
+
+// A hidden or private-storage file only exists until this page closes, so ask before leaving.
+const hasUnsaved = () => held.some(file => !file.saved)
+
+async function openLocal(name: string, size: number) {
+  const onDone = (file: Received) => {
+    held.push({ ...file, id: ++heldId, saved: false })
+    render()
+    void refreshLimit()
+  }
+  const filename = safeName(name)
+  if (receiveMode === 'opfs') {
+    try {
+      return await opfsWriter(await navigator.storage.getDirectory(), filename, onDone)
+    } catch {
+      // Some engines expose the API without a writable stream; fall through to memory if it fits.
+    }
+  }
+  if (size > MEMORY_LIMIT) throw new Error('文件过大，无法在此浏览器接收')
+  return memoryWriter(filename, onDone)
+}
+
+async function refreshLimit() {
+  if (receiveMode !== 'opfs') return
+  try {
+    const estimate = await navigator.storage.estimate()
+    session.receiveLimit = () => receiveLimit('opfs', estimate)
+  } catch {
+    // Keep the previous limit.
+  }
 }
 
 function saveNotice(action: string, name: string, message: string) {
@@ -513,6 +583,28 @@ app.addEventListener('click', event => {
         void transfer.accept(async () => (await picker.call(window, { suggestedName: name })).createWritable())
       }
       break
+    case 'save-local':
+      if (receiveMode !== 'picker' && transfer && session.phase === 'connected') {
+        // Size is read per file because later files of a batch open without another click.
+        const open = (name: string) => openLocal(name, transfer.view.size)
+        if (transfer.view.batchTotal) void transfer.acceptBatch(open)
+        else void transfer.accept(() => open(transfer.view.name))
+      }
+      break
+    case 'save-file': {
+      const file = held.find(item => String(item.id) === button?.dataset.id)
+      if (file) { saveToDevice(file); file.saved = true; render() }
+      break
+    }
+    case 'save-all':
+      for (const file of held) { saveToDevice(file); file.saved = true }
+      render()
+      break
+    case 'drop-file': {
+      const index = held.findIndex(item => String(item.id) === button?.dataset.id)
+      if (index >= 0) { void held[index].discard(); held.splice(index, 1); render() }
+      break
+    }
     case 'save-batch':
       if (folderPicker && transfer && session.phase === 'connected') {
         // The folder is asked for once; later files in the batch reuse it.
@@ -605,13 +697,18 @@ document.addEventListener('drop', event => {
 // Closing the tab mid-transfer silently aborts it, so ask first.
 window.addEventListener('beforeunload', event => {
   const phase = session.transfer?.view.phase
-  if (phase === 'sending' || phase === 'receiving' || phase === 'saving' || phase === 'confirming' || session.savingAfterDisconnect) {
+  if (phase === 'sending' || phase === 'receiving' || phase === 'saving' || phase === 'confirming' || session.savingAfterDisconnect || hasUnsaved()) {
     event.preventDefault()
     event.returnValue = ''
   }
 })
 
 window.addEventListener('online', () => session.reconnectNow())
+
+if (receiveMode === 'opfs') {
+  void navigator.storage.getDirectory().then(clearStaleReceived).catch(() => {})
+  void refreshLimit()
+}
 
 // An invite link carries the room code in its fragment; fill it in without joining.
 const invite = /^#(\d{4})$/.exec(location.hash)?.[1]

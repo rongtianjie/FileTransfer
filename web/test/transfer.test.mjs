@@ -368,3 +368,18 @@ test('a quota failure part-way through a batch stops it with the progress made',
   assert.equal(folder.files.has('big.bin'), false)
   host.dispose(); guest.dispose()
 })
+
+test('a file larger than this device can take is refused with a clear reason', async () => {
+  const { host, guest } = pair()
+  let limit = 10
+  guest.receiveLimit = () => limit
+  host.offer(new File([new Uint8Array(11)], 'big.bin'))
+  await until(() => host.view.phase === 'stopped')
+  assert.match(host.view.message, /超出对方设备/)
+  assert.equal(guest.view.phase, 'idle')
+  limit = 11
+  host.retry()
+  await until(() => guest.view.phase === 'offered')
+  guest.cancel()
+  await until(() => host.view.phase === 'stopped')
+})

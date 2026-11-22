@@ -90,6 +90,7 @@ export class Session {
   autoReconnect = false
   // Whether this browser can save incoming files; sending always works.
   receiveSupported = true
+  receiveLimit = () => Infinity
 
   private socket?: WebSocket
   private retryTimer?: ReturnType<typeof setTimeout>
@@ -472,6 +473,7 @@ export class Session {
     }, msg => this.receiveUpgrade(attempt, msg), () => this.unlimited)
     this.transfer = transfer
     transfer.canReceive = this.receiveSupported
+    transfer.receiveLimit = () => this.receiveLimit()
     transfer.retryFile = this.retryFile
     channel.onopen = () => this.connectionChanged(attempt)
     channel.onclose = channel.onerror = () => this.fail(attempt, '设备之间的数据连接已断开。')

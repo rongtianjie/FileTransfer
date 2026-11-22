@@ -20,7 +20,7 @@ type View = {
 type BatchInfo = { id: number; index: number; count: number }
 export type OpenBatchFile = (name: string) => Promise<DiskWriter>
 export type RelaySwitch = { type: 'relay-prepare' | 'relay-ready' | 'relay-busy' | 'relay-release'; id: number }
-type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed' | 'unsupported'
+type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed' | 'unsupported' | 'too_large'
 
 type Control = RelaySwitch
   | { type: 'offer'; id: number; name: string; size: number; batch?: BatchInfo }
@@ -51,6 +51,7 @@ function peerCancelMessage({ reason, message }: Extract<Control, { type: 'cancel
     case 'timeout': return '对方等待超时，可重新发送。'
     case 'save_failed': return '对方保存文件失败，可重新发送。'
     case 'unsupported': return '对方的浏览器只能发送文件，无法接收。'
+    case 'too_large': return '文件超出对方设备可接收的大小，请改用电脑接收或发送较小的文件。'
     case 'cancelled':
     case 'invalid':
     case 'failed': return '对方已停止传输，可重新发送。'
@@ -83,6 +84,8 @@ export class Transfer {
   unreportedSave?: { name: string; saved: boolean }
   // Browsers without a streaming save API can still send; they refuse incoming offers.
   canReceive = true
+  // Largest file this device can take right now (memory or storage bound); re-read per offer.
+  receiveLimit: () => number = () => Infinity
   private active?: Outgoing | Incoming
   // Sender: files still to offer after the current one. Receiver: where to save the rest.
   private outBatch?: { id: number; total: number; index: number; rest: File[] }
@@ -393,6 +396,10 @@ export class Transfer {
     }
     if (!this.canReceive) {
       this.sendControl({ type: 'cancel', id: msg.id, reason: 'unsupported' })
+      return
+    }
+    if (msg.size > this.receiveLimit()) {
+      this.sendControl({ type: 'cancel', id: msg.id, reason: 'too_large' })
       return
     }
     if (!this.available(true)) {
