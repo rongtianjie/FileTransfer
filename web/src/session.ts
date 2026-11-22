@@ -87,8 +87,12 @@ export class Session {
   unconfirmedSave?: { name: string; message: string }
   detachedSave?: { name: string; saved: boolean }
   transfer?: Transfer
+  autoReconnect = false
 
   private socket?: WebSocket
+  private retryTimer?: ReturnType<typeof setTimeout>
+  private retries = 0
+  private lostRoom = false
   private token?: string
   private attempt?: Attempt
   private nextUpgrade = 1
@@ -100,11 +104,16 @@ export class Session {
     this.changed = changed
   }
 
-  connect() {
+  connect(automatic = false) {
     if (this.socketState !== 'offline') return
+    clearTimeout(this.retryTimer)
+    this.retryTimer = undefined
     this.relayAvailable = false
     this.keyAvailable = false
-    this.message = ''
+    if (!automatic) {
+      this.message = ''
+      this.lostRoom = false
+    }
     this.socketState = 'connecting'
     const url = new URL('/api/session', location.href)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -113,6 +122,9 @@ export class Session {
     ws.onopen = () => {
       if (this.socket !== ws) return
       this.socketState = 'open'
+      this.retries = 0
+      if (automatic) this.message = this.lostRoom ? '服务连接中断，原房间已关闭。请重新创建或加入。' : ''
+      this.lostRoom = false
       this.changed()
     }
     ws.onmessage = ({ data }) => {
@@ -127,10 +139,30 @@ export class Session {
       this.socket = undefined
       this.adminProof = undefined
       this.socketState = 'offline'
-      this.reset('会话服务已断开。请重新连接，再创建或加入房间。')
+      this.lostRoom ||= this.phase !== 'idle'
+      this.reset(this.autoReconnect ? '会话服务已断开，正在自动重连…' : '会话服务已断开。请重新连接，再创建或加入房间。')
+      this.scheduleReconnect()
       this.changed()
     }
     this.changed()
+  }
+
+  // Retry with backoff so a sleeping laptop or network switch recovers without a click.
+  private scheduleReconnect() {
+    if (!this.autoReconnect || this.retryTimer) return
+    const delay = Math.min(1_000 * 2 ** this.retries, 15_000)
+    this.retries++
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined
+      this.connect(true)
+    }, delay)
+  }
+
+  // The browser reports connectivity again: skip the remaining backoff.
+  reconnectNow() {
+    if (!this.autoReconnect || this.socketState !== 'offline') return
+    this.retries = 0
+    this.connect(true)
   }
 
   enter(role: 'host' | 'guest', code: string) {

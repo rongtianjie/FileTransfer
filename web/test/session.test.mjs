@@ -367,3 +367,61 @@ for (const saved of [true, false]) {
     assert.deepEqual(guest.detachedSave, { name: file.name, saved })
   })
 }
+
+test('auto reconnect retries with backoff and reports a lost room once connected', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const sockets = []
+  class MockSocket {
+    static OPEN = 1
+    readyState = 1
+    constructor() { sockets.push(this) }
+    send() {}
+    receive(data) { this.onmessage({ data: JSON.stringify(data) }) }
+    close() { this.onclose() }
+  }
+  globalThis.WebSocket = MockSocket
+  const session = new Session(() => {})
+  session.autoReconnect = true
+  session.connect()
+  sockets[0].onopen()
+  session.enter('host', '')
+  sockets[0].receive({ type: 'created', code: '0421', token: 'own', expiresAt: 1000 })
+  sockets[0].close()
+  assert.equal(session.socketState, 'offline')
+  t.mock.timers.tick(999)
+  assert.equal(sockets.length, 1)
+  t.mock.timers.tick(1)
+  assert.equal(sockets.length, 2)
+  // A failed attempt doubles the delay.
+  sockets[1].close()
+  t.mock.timers.tick(1_999)
+  assert.equal(sockets.length, 2)
+  t.mock.timers.tick(1)
+  assert.equal(sockets.length, 3)
+  sockets[2].onopen()
+  assert.equal(session.socketState, 'open')
+  assert.match(session.message, /原房间已关闭/)
+  // A successful open resets the backoff; connectivity events skip the wait.
+  sockets[2].close()
+  session.reconnectNow()
+  assert.equal(sockets.length, 4)
+  sockets[3].onopen()
+  assert.equal(session.message, '')
+})
+
+test('without auto reconnect the socket stays offline until asked', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const sockets = []
+  class MockSocket {
+    static OPEN = 1
+    constructor() { sockets.push(this) }
+    close() { this.onclose() }
+  }
+  globalThis.WebSocket = MockSocket
+  const session = new Session(() => {})
+  session.connect()
+  sockets[0].close()
+  t.mock.timers.tick(60_000)
+  assert.equal(sockets.length, 1)
+  assert.match(session.message, /请重新连接/)
+})
