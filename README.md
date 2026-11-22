@@ -169,6 +169,9 @@ FILETRANSFER_DATA_DIR=/var/lib/filetransfer \
 
 | 环境变量 | 行为与默认值 |
 | --- | --- |
+| `FILETRANSFER_HTTP_ADDR` | HTTP(S) 监听地址，默认 `127.0.0.1:8080`。监听非回环地址必须配置证书。 |
+| `FILETRANSFER_ORIGIN` | 允许的 WebSocket 来源，如 `https://transfer.example.com`。留空则要求 `Origin` 与请求主机一致。 |
+| `FILETRANSFER_TLS_CERT` / `FILETRANSFER_TLS_KEY` | 证书链与私钥路径，必须同时配置。配置后由 Go 直接提供 HTTPS，并下发 HSTS。 |
 | `FILETRANSFER_TURN_IP` | TURN 公告 IPv4。留空禁用中继。 |
 | `FILETRANSFER_TURN_HOST` | 浏览器连接 TURN 的域名或 IPv4，默认为公告 IPv4。使用 TLS 时填证书覆盖的域名。 |
 | `FILETRANSFER_TURN_UDP` | UDP 监听地址，默认 `127.0.0.1:3478`。 |
