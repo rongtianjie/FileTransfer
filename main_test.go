@@ -1,12 +1,40 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestBrowserHeaders(t *testing.T) {
+	handler := browserHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	serve := func(path string, secure bool) http.Header {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if secure {
+			req.TLS = &tls.ConnectionState{}
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Header()
+	}
+	if got := serve("/", true).Get("Strict-Transport-Security"); got == "" {
+		t.Fatal("HTTPS responses need HSTS")
+	}
+	if got := serve("/", false).Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("plain HTTP must not send HSTS, got %q", got)
+	}
+	if got := serve("/assets/index-abc.js", false).Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("hashed assets should be immutable, got %q", got)
+	}
+	if got := serve("/", false).Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("index must revalidate, got %q", got)
+	}
+}
 
 func TestFailedHTTPStartupDoesNotRecordRelayCoverage(t *testing.T) {
 	occupied, err := net.Listen("tcp4", "127.0.0.1:0")

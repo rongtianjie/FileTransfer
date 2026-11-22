@@ -252,8 +252,14 @@ func browserHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: ws:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			w.Header().Set("Cache-Control", "no-cache")
+		} else if strings.HasPrefix(r.URL.Path, "/assets/") {
+			// Vite emits content-hashed file names under /assets/.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		next.ServeHTTP(w, r)
 	})
