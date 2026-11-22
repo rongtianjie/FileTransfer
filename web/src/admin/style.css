@@ -265,3 +265,8 @@ canvas { display: block; width: 100%; height: clamp(10.5rem, 27vw, 16rem); curso
 @media (max-width: 350px) {
   .limit-fields { grid-template-columns: 1fr; }
 }
+
+/* Embedded in the homepage's floating dialog: the dialog supplies the chrome. */
+.embedded .brand, .embedded .top-label { display: none; }
+.embedded .top-inner { min-height: 3rem; }
+.embedded main { padding-block: 1rem; }

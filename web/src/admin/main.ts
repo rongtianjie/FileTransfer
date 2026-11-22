@@ -1,4 +1,6 @@
 import './style.css'
+
+if (window !== window.top) document.documentElement.classList.add('embedded')
 import {
   adminLogin, AdminError, adminRequest, cancelTimeZonePayload, configPayload, formatQuotaInput, quotaInputBytes,
   type ConfigBaseline, type Dashboard, type HistoryDay, type KeyAction, type Quota, type TimeZoneCancellation,

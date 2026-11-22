@@ -112,7 +112,13 @@ test('homepage admin discovery offers an accessible retry after a sustained init
   })
   const dialog = control({ form })
   dialog.showModal = () => { dialog.open = true }
-  const page = control({ ':scope > button': button, a: link, dialog })
+  const consoleDialog = control({ button: control() })
+  const page = control({
+    ':scope > button': button,
+    ':scope > button:nth-of-type(2)': link,
+    '.admin-console': consoleDialog,
+    '.admin-login': dialog,
+  })
 
   const timers = []
   const totals = control()

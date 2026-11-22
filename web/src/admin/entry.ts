@@ -16,10 +16,16 @@ export function mountAdminEntry(container: HTMLElement, totals?: HTMLElement) {
       <span>管理后台</span>
       <span class="tip-bubble" id="home-admin-entry-tip" role="tooltip">登录并管理中继配额</span>
     </button>
-    <a class="admin-entry-action tip-trigger" href="/admin/" hidden>
+    <button class="admin-entry-action tip-trigger" type="button" aria-haspopup="dialog" hidden>
       <span>中继配置</span>
       <span class="tip-bubble" role="tooltip">查看流量概览与调整配置</span>
-    </a>
+    </button>
+    <dialog class="admin-console" aria-label="中继配置">
+      <div class="admin-console-bar">
+        <span>中继配置</span>
+        <button class="secondary" type="button" aria-label="关闭中继配置">关闭</button>
+      </div>
+    </dialog>
     <dialog class="admin-login" aria-labelledby="home-admin-title">
       <form method="dialog">
         <h2 id="home-admin-title">管理员登录</h2>
@@ -38,8 +44,10 @@ export function mountAdminEntry(container: HTMLElement, totals?: HTMLElement) {
   const open = container.querySelector<HTMLButtonElement>(':scope > button')!
   const openLabel = open.querySelector('span')!
   const openTooltip = open.querySelector('[role="tooltip"]')!
-  const config = container.querySelector<HTMLAnchorElement>('a')!
-  const dialog = container.querySelector('dialog')!
+  const config = container.querySelector<HTMLButtonElement>(':scope > button:nth-of-type(2)')!
+  const consoleDialog = container.querySelector<HTMLDialogElement>('.admin-console')!
+  const consoleClose = consoleDialog.querySelector('button')!
+  const dialog = container.querySelector<HTMLDialogElement>('.admin-login')!
   const form = dialog.querySelector('form')!
   const username = form.querySelector<HTMLInputElement>('[name="username"]')!
   const password = form.querySelector<HTMLInputElement>('[name="password"]')!
@@ -62,6 +70,7 @@ export function mountAdminEntry(container: HTMLElement, totals?: HTMLElement) {
     else open.removeAttribute('aria-haspopup')
     open.hidden = state !== 'signed-out' && !retrying
     config.hidden = state !== 'signed-in'
+    if (state !== 'signed-in' && consoleDialog.open) consoleDialog.close()
     container.hidden = state === 'hidden'
     if (totals) {
       totals.hidden = state !== 'signed-in'
@@ -129,6 +138,28 @@ export function mountAdminEntry(container: HTMLElement, totals?: HTMLElement) {
     revision++
     showNotice('')
     dialog.showModal()
+  })
+  // The console lives in an iframe inside a non-modal floating dialog, so the
+  // homepage (and any running transfer) keeps its state while it is open.
+  function openConsole() {
+    if (!consoleDialog.querySelector('iframe')) {
+      const frame = document.createElement('iframe')
+      frame.src = '/admin/'
+      frame.title = '中继配置'
+      consoleDialog.append(frame)
+    }
+    if (!consoleDialog.open) consoleDialog.show()
+    consoleDialog.querySelector('iframe')!.focus()
+  }
+  config.addEventListener('click', openConsole)
+  consoleClose.addEventListener('click', () => consoleDialog.close())
+  consoleDialog.addEventListener('keydown', event => {
+    if (event.key === 'Escape') consoleDialog.close()
+  })
+  consoleDialog.addEventListener('close', () => {
+    consoleDialog.querySelector('iframe')?.remove()
+    void refresh()
+    config.focus()
   })
   cancel.addEventListener('click', () => dialog.close())
   dialog.addEventListener('cancel', event => {
