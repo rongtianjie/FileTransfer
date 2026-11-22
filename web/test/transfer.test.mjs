@@ -267,3 +267,16 @@ test('an older receiver can report a final close failure using the legacy cancel
     guest.dispose()
   }
 })
+
+test('a send-only browser refuses incoming offers and can still send', async () => {
+  const { host, guest } = pair()
+  guest.canReceive = false
+  host.offer(new File(['a'], 'to-phone.txt'))
+  await until(() => host.view.phase === 'stopped')
+  assert.match(host.view.message, /只能发送文件/)
+  assert.equal(guest.view.phase, 'idle')
+  guest.offer(new File(['b'], 'from-phone.txt'))
+  await until(() => host.view.phase === 'offered')
+  await host.accept(async () => ({ write: async () => {}, close: async () => {}, abort: async () => {} }))
+  await until(() => guest.view.phase === 'done')
+})

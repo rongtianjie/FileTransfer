@@ -14,7 +14,7 @@ export interface DiskWriter {
 type Phase = 'idle' | 'waiting' | 'offered' | 'picking' | 'sending' | 'receiving' | 'saving' | 'confirming' | 'unconfirmed' | 'done' | 'stopped'
 type View = { phase: Phase; name: string; size: number; bytes: number; sent: number; message: string }
 export type RelaySwitch = { type: 'relay-prepare' | 'relay-ready' | 'relay-busy' | 'relay-release'; id: number }
-type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed'
+type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed' | 'unsupported'
 
 type Control = RelaySwitch
   | { type: 'offer'; id: number; name: string; size: number }
@@ -44,6 +44,7 @@ function peerCancelMessage({ reason, message }: Extract<Control, { type: 'cancel
     case 'quota': return insufficientMessage
     case 'timeout': return '对方等待超时，可重新发送。'
     case 'save_failed': return '对方保存文件失败，可重新发送。'
+    case 'unsupported': return '对方的浏览器只能发送文件，无法接收。'
     case 'cancelled':
     case 'invalid':
     case 'failed': return '对方已停止传输，可重新发送。'
@@ -65,6 +66,8 @@ export class Transfer {
   retryFile?: File
   upgradeBytes?: number
   unreportedSave?: { name: string; saved: boolean }
+  // Browsers without a streaming save API can still send; they refuse incoming offers.
+  canReceive = true
   private active?: Outgoing | Incoming
   private nextId: number
   private lastOffer = 0
@@ -317,6 +320,10 @@ export class Transfer {
     this.lastOffer = msg.id
     if (!validSize(msg.size, this.maxFileSize) || typeof msg.name !== 'string' || !msg.name || msg.name.length > 1024) {
       this.send({ type: 'cancel', id: msg.id, reason: 'invalid' })
+      return
+    }
+    if (!this.canReceive) {
+      this.sendControl({ type: 'cancel', id: msg.id, reason: 'unsupported' })
       return
     }
     if (!this.available(true)) {

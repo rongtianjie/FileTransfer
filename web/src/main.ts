@@ -10,13 +10,9 @@ type PickerWindow = Window & {
 }
 
 const picker = (window as PickerWindow).showSaveFilePicker
-const agent = navigator.userAgent
-const desktopChromium = /(?:Chrome|Edg)\//.test(agent) && !/Mobile|Android|iPad|iPhone|OPR\//.test(agent)
-const supportIssue = !window.isSecureContext
-  ? '请通过 HTTPS 或本机 localhost 打开，才能使用文件保存功能。'
-  : !picker || !window.RTCPeerConnection
-    ? '请使用支持文件流式保存的桌面版 Chrome 或 Edge 浏览器。'
-    : ''
+// Receiving needs streaming saves (desktop Chromium). Sending works wherever WebRTC does.
+const canReceive = Boolean(picker) && window.isSecureContext
+const supportIssue = !window.RTCPeerConnection ? '当前浏览器不支持 WebRTC，无法使用本服务。' : ''
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
@@ -79,7 +75,7 @@ app.innerHTML = `
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="signup-tip">无需注册<span id="signup-tip" class="tip-bubble" role="tooltip">开箱即用，无需登录或绑定个人账号，保障数据隐私。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="size-tip">支持大文件传输<span id="size-tip" class="tip-bubble" role="tooltip">普通房间单文件支持高达 2 GiB。有管理员登录的房间不设单文件上限。</span></span>
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="encryption-tip">端到端加密<span id="encryption-tip" class="tip-bubble" role="tooltip">基于 WebRTC 原生 DTLS/SCTP 加密协议，传输数据不经第三方留存。</span></span>
-      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${desktopChromium ? '极速流式落盘' : '实验性浏览器环境'}<span id="storage-tip" class="tip-bubble" role="tooltip">${desktopChromium ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : '当前浏览器可能缺乏流式磁盘写入支持，建议使用桌面版 Chrome 或 Edge 获得最佳体验。'}</span></span>
+      <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${canReceive ? '极速流式落盘' : '仅可发送文件'}<span id="storage-tip" class="tip-bubble" role="tooltip">${canReceive ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : window.isSecureContext ? '当前浏览器不支持流式保存，只能发送文件。需要接收文件时，请使用桌面版 Chrome 或 Edge。' : '请通过 HTTPS 或 localhost 打开，才能接收文件。当前只能发送文件。'}</span></span>
     </footer>
   </main>
   <input id="file-input" type="file" hidden>
@@ -94,6 +90,7 @@ const room = find('room')
 const fileInput = find<HTMLInputElement>('file-input')
 const session = new Session(render)
 session.autoReconnect = true
+session.receiveSupported = canReceive
 const speed = new SpeedMeter()
 let speedTransfer: Transfer | undefined
 const baseTitle = document.title
@@ -163,6 +160,7 @@ function transferMarkup() {
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
       ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
       ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送；双方任意一台设备均可发起传输。</p>' : ''}
+      ${phase === 'idle' && !canReceive ? '<p class="muted">此浏览器只能发送文件，无法接收。</p>' : ''}
       ${phase === 'offered' ? '<div class="button-row"><button class="primary" type="button" data-action="save">选择位置并接收</button><button class="secondary" type="button" data-action="cancel">拒收</button></div>' : ''}
       ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
       ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
