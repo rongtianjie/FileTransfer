@@ -333,9 +333,46 @@ test('cancelling mid-batch stops the remaining files and reports progress', asyn
   host.dispose(); guest.dispose()
 })
 
-test('a declined first file clears the sender queue', async () => {
+test('retry after a declined batch resends every file that was not sent', async () => {
   const { host, guest } = pair()
   host.offerFiles([new File(['1'], 'a.txt'), new File(['2'], 'b.txt')])
+  await until(() => guest.view.phase === 'offered')
+  guest.cancel()
+  await until(() => host.view.phase === 'stopped')
+  host.retry()
+  await until(() => guest.view.phase === 'offered')
+  assert.equal(guest.view.name, 'a.txt')
+  assert.equal(guest.view.batchTotal, 2)
+  host.dispose(); guest.dispose()
+})
+
+test('retry after an interruption part-way resumes with the unsent files only', async () => {
+  const { host, guest } = pair()
+  const folder = memoryFolder()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const open = async name => {
+    const writer = await folder.open(name)
+    return name === 'b.txt' ? { ...writer, write: async bytes => { await gate; await writer.write(bytes) } } : writer
+  }
+  host.offerFiles([new File(['1'], 'a.txt'), new File(['2'], 'b.txt'), new File(['3'], 'c.txt')])
+  await until(() => guest.view.phase === 'offered')
+  await guest.acceptBatch(open)
+  await until(() => guest.view.name === 'b.txt' && guest.view.phase === 'receiving')
+  guest.cancel()
+  release()
+  await until(() => host.view.phase === 'stopped')
+  host.retry()
+  await until(() => guest.view.phase === 'offered')
+  assert.equal(guest.view.name, 'b.txt')
+  assert.equal(guest.view.batchIndex, 1)
+  assert.equal(guest.view.batchTotal, 2)
+  host.dispose(); guest.dispose()
+})
+
+test('a single file still retries on its own', async () => {
+  const { host, guest } = pair()
+  host.offer(new File(['1'], 'only.txt'))
   await until(() => guest.view.phase === 'offered')
   guest.cancel()
   await until(() => host.view.phase === 'stopped')

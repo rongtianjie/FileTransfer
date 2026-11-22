@@ -80,6 +80,8 @@ const emptyView: View = { phase: 'idle', name: '', bytes: 0, sent: 0, size: 0, m
 export class Transfer {
   view: View = { ...emptyView }
   retryFile?: File
+  // Files of an interrupted batch that still need sending, current one first.
+  private retryQueue?: File[]
   upgradeBytes?: number
   unreportedSave?: { name: string; saved: boolean }
   // Browsers without a streaming save API can still send; they refuse incoming offers.
@@ -158,10 +160,14 @@ export class Transfer {
       this.update({ ...emptyView, phase: 'stopped', message: this.unlimited() ? '文件大小无效。' : fileLimitMessage })
       return false
     }
+    this.retryQueue = undefined
     const [first, ...rest] = files
     this.outBatch = rest.length ? { id: this.nextId, total: files.length, index: 1, rest } : undefined
     const started = this.begin(first)
-    if (!started) this.outBatch = undefined
+    if (!started) {
+      this.outBatch = undefined
+      if (files.length > 1) this.retryQueue = files
+    }
     return started
   }
 
@@ -196,11 +202,15 @@ export class Transfer {
     }
     batch.index++
     // A failed offer (for example relay credit) leaves the stopped view that begin() set.
-    if (!this.begin(next)) this.outBatch = undefined
+    if (!this.begin(next)) {
+      this.retryQueue = [next, ...batch.rest]
+      this.outBatch = undefined
+    }
   }
 
   retry() {
-    if (this.retryFile) this.offer(this.retryFile)
+    const files = this.retryQueue ?? (this.retryFile ? [this.retryFile] : [])
+    if (files.length) this.offerFiles(files)
   }
 
   requestUpgrade() {
@@ -321,6 +331,7 @@ export class Transfer {
     if (active.direction === 'in') this.inBatch = undefined
     const batch = this.outBatch
     this.outBatch = undefined
+    if (batch && active.direction === 'out') this.retryQueue = [active.file, ...batch.rest]
     if (active.direction === 'in' && active.writer) {
       void active.writer.abort().catch(() => {})
     }
@@ -334,7 +345,10 @@ export class Transfer {
 
   private settle(phase: 'done' | 'unconfirmed' | 'stopped', message = '') {
     const active = this.active
-    if (active?.direction === 'out' && active.file === this.retryFile) this.retryFile = undefined
+    if (active?.direction === 'out' && active.file === this.retryFile) {
+      this.retryFile = undefined
+      this.retryQueue = undefined
+    }
     this.active = undefined
     clearTimeout(this.timer)
     if (phase !== 'done') {
