@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
-import { Transfer, MAX_FILE, CHUNK, WINDOW } from '../src/transfer.ts'
+import { Transfer, MAX_FILE, MAX_BATCH, CHUNK, WINDOW } from '../src/transfer.ts'
 
 function pair(budget = () => undefined, unlimited = () => false) {
   const create = () => ({
@@ -279,4 +279,92 @@ test('a send-only browser refuses incoming offers and can still send', async () 
   await until(() => host.view.phase === 'offered')
   await host.accept(async () => ({ write: async () => {}, close: async () => {}, abort: async () => {} }))
   await until(() => guest.view.phase === 'done')
+})
+
+function memoryFolder() {
+  const files = new Map()
+  const open = async name => {
+    const chunks = []
+    files.set(name, chunks)
+    return { write: async bytes => { chunks.push(new Uint8Array(bytes)) }, close: async () => {}, abort: async () => {} }
+  }
+  return { files, open }
+}
+
+test('a batch is accepted once and the rest saves into the same folder without prompting', async () => {
+  const { host, guest } = pair()
+  const folder = memoryFolder()
+  assert.equal(host.offerFiles([new File(['one'], 'a.txt'), new File(['two!'], 'b.txt'), new File([''], 'c.txt')]), true)
+  await until(() => guest.view.phase === 'offered')
+  assert.equal(guest.view.batchIndex, 1)
+  assert.equal(guest.view.batchTotal, 3)
+  await guest.acceptBatch(folder.open)
+  await until(() => host.view.phase === 'done' && host.view.message === '已发送 3 个文件。')
+  await until(() => guest.view.phase === 'done')
+  assert.deepEqual([...folder.files.keys()], ['a.txt', 'b.txt', 'c.txt'])
+  assert.equal(new TextDecoder().decode(folder.files.get('b.txt')[0]), 'two!')
+  assert.equal(guest.view.message, '已接收 3 个文件。')
+  assert.equal(host.canOffer, true)
+  // The folder is released with the batch, so the next offer asks again.
+  host.offer(new File(['x'], 'later.txt'))
+  await until(() => guest.view.phase === 'offered')
+  host.dispose(); guest.dispose()
+})
+
+test('cancelling mid-batch stops the remaining files and reports progress', async () => {
+  const { host, guest } = pair()
+  const folder = memoryFolder()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const open = async name => {
+    const writer = await folder.open(name)
+    return name === 'b.txt' ? { ...writer, write: async bytes => { await gate; await writer.write(bytes) } } : writer
+  }
+  host.offerFiles([new File(['1'], 'a.txt'), new File(['2'], 'b.txt'), new File(['3'], 'c.txt')])
+  await until(() => guest.view.phase === 'offered')
+  await guest.acceptBatch(open)
+  await until(() => guest.view.name === 'b.txt' && guest.view.phase === 'receiving')
+  guest.cancel()
+  release()
+  await until(() => host.view.phase === 'stopped')
+  assert.match(host.view.message, /已完成 1 \/ 3 个文件/)
+  assert.equal(folder.files.has('c.txt'), false)
+  assert.equal(host.canOffer, true)
+  host.dispose(); guest.dispose()
+})
+
+test('a declined first file clears the sender queue', async () => {
+  const { host, guest } = pair()
+  host.offerFiles([new File(['1'], 'a.txt'), new File(['2'], 'b.txt')])
+  await until(() => guest.view.phase === 'offered')
+  guest.cancel()
+  await until(() => host.view.phase === 'stopped')
+  host.retry()
+  await until(() => guest.view.phase === 'offered')
+  assert.equal(guest.view.batchTotal, undefined)
+  host.dispose(); guest.dispose()
+})
+
+test('batch limits and malformed batch metadata are handled', async () => {
+  const { host, guest, left } = pair()
+  const many = Array.from({ length: MAX_BATCH + 1 }, (_, i) => new File([''], `${i}.txt`))
+  assert.equal(host.offerFiles(many), false)
+  assert.match(host.view.message, /最多/)
+  // A bad batch field degrades to an ordinary single-file offer.
+  left.send(JSON.stringify({ type: 'offer', id: 1, name: 'x.txt', size: 1, batch: { id: 1, index: 9, count: 2 } }))
+  await until(() => guest.view.phase === 'offered')
+  assert.equal(guest.view.batchTotal, undefined)
+  host.dispose(); guest.dispose()
+})
+
+test('a quota failure part-way through a batch stops it with the progress made', async () => {
+  const { host, guest } = pair(() => 100)
+  const folder = memoryFolder()
+  host.offerFiles([new File(['1'], 'a.txt'), new File([new Uint8Array(500)], 'big.bin')])
+  await until(() => guest.view.phase === 'offered')
+  await guest.acceptBatch(folder.open)
+  await until(() => host.view.phase === 'stopped')
+  assert.equal(host.canOffer, true)
+  assert.equal(folder.files.has('big.bin'), false)
+  host.dispose(); guest.dispose()
 })

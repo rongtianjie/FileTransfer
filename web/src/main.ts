@@ -7,9 +7,36 @@ import { SpeedMeter, formatSpeed } from './speed.ts'
 
 type PickerWindow = Window & {
   showSaveFilePicker?: (options: { suggestedName: string }) => Promise<FileSystemFileHandle>
+  showDirectoryPicker?: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+}
+
+// Same file name rules for single saves and folders: path separators and control characters are unsafe.
+function safeName(name: string) {
+  const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim()
+  return cleaned && !/^\.+$/.test(cleaned) ? cleaned : '接收的文件'
+}
+
+// Never overwrite: an existing "a.txt" makes the next file "a (1).txt".
+async function createInFolder(folder: FileSystemDirectoryHandle, wanted: string) {
+  const name = safeName(wanted)
+  const dot = name.lastIndexOf('.')
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
+  for (let copy = 0; copy < 1000; copy++) {
+    const candidate = copy ? `${stem} (${copy})${ext}` : name
+    try {
+      await folder.getFileHandle(candidate)
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        return (await folder.getFileHandle(candidate, { create: true })).createWritable()
+      }
+      throw error
+    }
+  }
+  throw new Error('同名文件过多')
 }
 
 const picker = (window as PickerWindow).showSaveFilePicker
+const folderPicker = (window as PickerWindow).showDirectoryPicker
 // Receiving needs streaming saves (desktop Chromium). Sending works wherever WebRTC does.
 const canReceive = Boolean(picker) && window.isSecureContext
 const supportIssue = !window.RTCPeerConnection ? '当前浏览器不支持 WebRTC，无法使用本服务。' : ''
@@ -78,7 +105,7 @@ app.innerHTML = `
       <span class="tip-trigger tip-text" tabindex="0" aria-describedby="storage-tip">${canReceive ? '极速流式落盘' : '仅可发送文件'}<span id="storage-tip" class="tip-bubble" role="tooltip">${canReceive ? '支持 File System Access API，边接收边写入磁盘，不占用浏览器运行内存。' : window.isSecureContext ? '当前浏览器不支持流式保存，只能发送文件。需要接收文件时，请使用桌面版 Chrome 或 Edge。' : '请通过 HTTPS 或 localhost 打开，才能接收文件。当前只能发送文件。'}</span></span>
     </footer>
   </main>
-  <input id="file-input" type="file" hidden>
+  <input id="file-input" type="file" multiple hidden>
   <div id="announcement" class="sr-only" role="status"></div>
   <div id="save-announcement" class="sr-only" role="status"></div>
 `
@@ -155,13 +182,15 @@ function transferMarkup() {
         <h2 id="transfer-title">${phase === 'idle' ? '传输文件' : phases[phase]}</h2>
         ${free || disabled ? `<button class="primary" type="button" data-action="select" ${blocked}>选择文件</button>` : ''}
       </div>
-      ${view?.name ? `<p class="file-name"><bdi>${html(view.name)}</bdi><span>${formatByteSize(view.size)}</span></p>` : ''}
+      ${view?.name ? `<p class="file-name"><bdi>${html(view.name)}</bdi><span>${view.batchTotal ? `第 ${view.batchIndex} / ${view.batchTotal} 个 · ` : ''}${formatByteSize(view.size)}</span></p>` : ''}
       ${progress ? '<div class="progress"><progress id="progress" aria-label="已写入的字节数" max="1" value="0"></progress><span id="progress-text"></span></div>' : ''}
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
       ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
-      ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送；双方任意一台设备均可发起传输。</p>' : ''}
+      ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送，可一次选择多个；双方任意一台设备均可发起传输。</p>' : ''}
       ${phase === 'idle' && !canReceive ? '<p class="muted">此浏览器只能发送文件，无法接收。</p>' : ''}
-      ${phase === 'offered' ? '<div class="button-row"><button class="primary" type="button" data-action="save">选择位置并接收</button><button class="secondary" type="button" data-action="cancel">拒收</button></div>' : ''}
+      ${phase === 'offered' ? `<div class="button-row">${view?.batchTotal && folderPicker
+        ? `<button class="primary" type="button" data-action="save-batch">选择文件夹并接收 ${view.batchTotal} 个文件</button>`
+        : '<button class="primary" type="button" data-action="save">选择位置并接收</button>'}<button class="secondary" type="button" data-action="cancel">拒收</button></div>` : ''}
       ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
       ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
     </section>
@@ -461,19 +490,29 @@ app.addEventListener('click', event => {
       break
     case 'save':
       if (picker && transfer && session.phase === 'connected') {
-        const name = transfer.view.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '接收的文件'
+        const name = safeName(transfer.view.name)
         void transfer.accept(async () => (await picker.call(window, { suggestedName: name })).createWritable())
+      }
+      break
+    case 'save-batch':
+      if (folderPicker && transfer && session.phase === 'connected') {
+        // The folder is asked for once; later files in the batch reuse it.
+        let folder: FileSystemDirectoryHandle | undefined
+        void transfer.acceptBatch(async name => {
+          folder ??= await folderPicker.call(window, { mode: 'readwrite' })
+          return createInFolder(folder, name)
+        })
       }
       break
   }
 })
 
 fileInput.addEventListener('change', () => {
-  const file = fileInput.files?.[0]
+  const files = Array.from(fileInput.files ?? [])
   fileInput.value = ''
   const target = fileTarget
   fileTarget = undefined
-  if (file && session.phase === 'connected' && session.transfer === target) target?.offer(file)
+  if (files.length && session.phase === 'connected' && session.transfer === target) target?.offerFiles(files)
 })
 
 function tooltipTrigger(target: EventTarget | null) {
@@ -531,16 +570,17 @@ document.addEventListener('drop', event => {
   event.preventDefault()
   console_.classList.remove('dragging')
   const transfer = session.transfer
-  const files = event.dataTransfer!.files
+  const files = Array.from(event.dataTransfer!.files)
   if (!droppable() || !transfer || !files.length) return
-  const entry = event.dataTransfer!.items[0]?.webkitGetAsEntry?.()
-  if (files.length > 1 || (entry && !entry.isFile)) {
-    session.message = '一次只能发送一个文件，请逐个发送。'
+  // Folders cannot be sent; refuse the whole drop rather than silently skipping part of it.
+  const items = Array.from(event.dataTransfer!.items)
+  if (items.some(item => item.webkitGetAsEntry?.()?.isFile === false)) {
+    session.message = '暂不支持发送文件夹，请选择文件。'
     render()
     return
   }
   session.message = ''
-  transfer.offer(files[0])
+  transfer.offerFiles(files)
 })
 
 // Closing the tab mid-transfer silently aborts it, so ask first.

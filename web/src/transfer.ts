@@ -4,6 +4,7 @@ export const WINDOW = 1024 * 1024
 const BUFFER = 256 * 1024
 const HEADER = 4
 const TIMEOUT = 60_000
+export const MAX_BATCH = 200
 
 export interface DiskWriter {
   write(bytes: Uint8Array<ArrayBuffer>): Promise<void>
@@ -12,12 +13,17 @@ export interface DiskWriter {
 }
 
 type Phase = 'idle' | 'waiting' | 'offered' | 'picking' | 'sending' | 'receiving' | 'saving' | 'confirming' | 'unconfirmed' | 'done' | 'stopped'
-type View = { phase: Phase; name: string; size: number; bytes: number; sent: number; message: string }
+type View = {
+  phase: Phase; name: string; size: number; bytes: number; sent: number; message: string
+  batchIndex?: number; batchTotal?: number
+}
+type BatchInfo = { id: number; index: number; count: number }
+export type OpenBatchFile = (name: string) => Promise<DiskWriter>
 export type RelaySwitch = { type: 'relay-prepare' | 'relay-ready' | 'relay-busy' | 'relay-release'; id: number }
 type CancelReason = 'cancelled' | 'busy' | 'quota' | 'invalid' | 'timeout' | 'failed' | 'save_failed' | 'unsupported'
 
 type Control = RelaySwitch
-  | { type: 'offer'; id: number; name: string; size: number }
+  | { type: 'offer'; id: number; name: string; size: number; batch?: BatchInfo }
   | { type: 'accept' | 'finish' | 'complete'; id: number }
   | { type: 'cancel'; id: number; reason?: CancelReason; message?: string }
   | { type: 'ack'; id: number; bytes: number }
@@ -26,7 +32,7 @@ type Control = RelaySwitch
 type Outgoing = { direction: 'out'; id: number; file: File; sent: number; written: number; accepted: boolean; finished: boolean }
 type Incoming = {
   direction: 'in'; id: number; name: string; size: number; queued: number; written: number
-  writer?: DiskWriter; writes: Promise<void>; finished: boolean
+  writer?: DiskWriter; writes: Promise<void>; finished: boolean; batch?: BatchInfo
 }
 
 const validSize = (size: unknown, max = MAX_FILE): size is number =>
@@ -59,7 +65,16 @@ function peerCancelMessage({ reason, message }: Extract<Control, { type: 'cancel
   }
 }
 
-const emptyView: View = { phase: 'idle', name: '', bytes: 0, sent: 0, size: 0, message: '' }
+function validBatch(batch: unknown): BatchInfo | undefined {
+  if (!batch || typeof batch !== 'object') return undefined
+  const { id, index, count } = batch as Record<string, unknown>
+  const whole = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value)
+  return whole(id) && whole(index) && whole(count) && id > 0 && count >= 2 && count <= MAX_BATCH && index >= 1 && index <= count
+    ? { id, index, count } : undefined
+}
+
+// update() merges, so batch fields must be cleared explicitly.
+const emptyView: View = { phase: 'idle', name: '', bytes: 0, sent: 0, size: 0, message: '', batchIndex: undefined, batchTotal: undefined }
 
 export class Transfer {
   view: View = { ...emptyView }
@@ -69,6 +84,9 @@ export class Transfer {
   // Browsers without a streaming save API can still send; they refuse incoming offers.
   canReceive = true
   private active?: Outgoing | Incoming
+  // Sender: files still to offer after the current one. Receiver: where to save the rest.
+  private outBatch?: { id: number; total: number; index: number; rest: File[] }
+  private inBatch?: { id: number; open: OpenBatchFile }
   private nextId: number
   private lastOffer = 0
   private pumping = false
@@ -122,11 +140,29 @@ export class Transfer {
   }
 
   offer(file: File): boolean {
-    if (!this.canOffer) return false
-    if (!validSize(file.size, this.maxFileSize)) {
+    return this.offerFiles([file])
+  }
+
+  // Files go one at a time through the normal offer flow; a batch only adds progress context
+  // and lets the receiver save the rest into one folder without prompting again.
+  offerFiles(files: File[]): boolean {
+    if (!this.canOffer || !files.length) return false
+    if (files.length > MAX_BATCH) {
+      this.update({ ...emptyView, phase: 'stopped', message: `一次最多发送 ${MAX_BATCH} 个文件。` })
+      return false
+    }
+    if (!files.every(file => validSize(file.size, this.maxFileSize))) {
       this.update({ ...emptyView, phase: 'stopped', message: this.unlimited() ? '文件大小无效。' : fileLimitMessage })
       return false
     }
+    const [first, ...rest] = files
+    this.outBatch = rest.length ? { id: this.nextId, total: files.length, index: 1, rest } : undefined
+    const started = this.begin(first)
+    if (!started) this.outBatch = undefined
+    return started
+  }
+
+  private begin(file: File): boolean {
     this.retryFile = file
     if (this.insufficient(file.size)) {
       this.update({ ...emptyView, phase: 'stopped', name: file.name, size: file.size, message: insufficientMessage })
@@ -135,11 +171,29 @@ export class Transfer {
     }
     const id = this.nextId
     this.nextId += 2
+    const batch = this.outBatch && { id: this.outBatch.id, index: this.outBatch.index, count: this.outBatch.total }
     this.active = { direction: 'out', id, file, sent: 0, written: 0, accepted: false, finished: false }
-    this.update({ ...emptyView, phase: 'waiting', name: file.name, size: file.size })
-    this.send({ type: 'offer', id, name: file.name, size: file.size })
+    this.update({
+      ...emptyView, phase: 'waiting', name: file.name, size: file.size,
+      ...(batch && { batchIndex: batch.index, batchTotal: batch.count }),
+    })
+    this.send({ type: 'offer', id, name: file.name, size: file.size, ...(batch && { batch }) })
     this.arm(180_000)
     return true
+  }
+
+  private advance() {
+    const batch = this.outBatch
+    if (!batch) return
+    const next = batch.rest.shift()
+    if (!next) {
+      this.outBatch = undefined
+      this.update({ message: `已发送 ${batch.total} 个文件。` })
+      return
+    }
+    batch.index++
+    // A failed offer (for example relay credit) leaves the stopped view that begin() set.
+    if (!this.begin(next)) this.outBatch = undefined
   }
 
   retry() {
@@ -200,6 +254,14 @@ export class Transfer {
     this.arm()
   }
 
+  // Accepts this file and every later file of its batch into the same place.
+  async acceptBatch(open: OpenBatchFile) {
+    const incoming = this.active
+    if (incoming?.direction !== 'in' || !incoming.batch) return
+    await this.accept(() => open(incoming.name))
+    if (this.active === incoming && incoming.writer) this.inBatch = { id: incoming.batch.id, open }
+  }
+
   cancel() {
     if (this.view.phase !== 'saving' && this.view.phase !== 'confirming') this.stop('已取消传输。', 'cancelled')
   }
@@ -253,10 +315,13 @@ export class Transfer {
     if (!active || this.view.phase === 'saving') return
     this.active = undefined
     clearTimeout(this.timer)
+    if (active.direction === 'in') this.inBatch = undefined
+    const batch = this.outBatch
+    this.outBatch = undefined
     if (active.direction === 'in' && active.writer) {
       void active.writer.abort().catch(() => {})
     }
-    this.update({ phase: 'stopped', message })
+    this.update({ phase: 'stopped', message: batch ? `${message} 已完成 ${batch.index - 1} / ${batch.total} 个文件。` : message })
     if (reason) this.sendControl({ type: 'cancel', id: active.id, reason })
   }
 
@@ -269,6 +334,10 @@ export class Transfer {
     if (active?.direction === 'out' && active.file === this.retryFile) this.retryFile = undefined
     this.active = undefined
     clearTimeout(this.timer)
+    if (phase !== 'done') {
+      this.outBatch = undefined
+      this.inBatch = undefined
+    }
     this.update({ phase, message })
   }
 
@@ -344,9 +413,24 @@ export class Transfer {
       this.sendControl({ type: 'cancel', id: msg.id, reason: 'quota' })
       return
     }
-    this.active = { direction: 'in', id: msg.id, name: msg.name, size: msg.size, queued: 0, written: 0, writes: Promise.resolve(), finished: false }
-    this.update({ ...emptyView, phase: 'offered', name: msg.name, size: msg.size })
+    const batch = validBatch(msg.batch)
+    const sink = batch && this.inBatch?.id === batch.id ? this.inBatch : undefined
+    if (!sink) this.inBatch = undefined
+    const incoming: Incoming = {
+      direction: 'in', id: msg.id, name: msg.name, size: msg.size, queued: 0, written: 0,
+      writes: Promise.resolve(), finished: false, batch,
+    }
+    this.active = incoming
+    this.update({
+      ...emptyView, phase: 'offered', name: msg.name, size: msg.size,
+      ...(batch && { batchIndex: batch.index, batchTotal: batch.count }),
+    })
     this.arm(180_000)
+    if (sink && batch) {
+      // The receiver already chose a folder for this batch.
+      if (batch.index === batch.count) this.inBatch = undefined
+      void this.accept(() => sink.open(msg.name))
+    }
   }
 
   private receiveSenderControl(active: Outgoing, msg: Control) {
@@ -364,6 +448,7 @@ export class Transfer {
       void this.pump()
     } else if (msg.type === 'complete' && active.finished && active.written === active.file.size) {
       this.settle('done')
+      this.advance()
     }
   }
 
@@ -444,7 +529,8 @@ export class Transfer {
       : { type: 'cancel', id: incoming.id, reason: 'save_failed' })
     const disconnect = !reported && !this.disposed
     if (disconnect) this.unreportedSave = { name: incoming.name, saved }
-    this.settle(saved ? 'done' : 'stopped', saved ? '' : saveFailureMessage)
+    const last = incoming.batch && incoming.batch.index === incoming.batch.count
+    this.settle(saved ? 'done' : 'stopped', saved ? (last ? `已接收 ${incoming.batch!.count} 个文件。` : '') : saveFailureMessage)
     if (disconnect) this.channel.close()
   }
 }
