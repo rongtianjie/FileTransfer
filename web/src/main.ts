@@ -3,6 +3,7 @@ import { Session } from './session.ts'
 import type { Transfer } from './transfer.ts'
 import { mountAdminEntry } from './admin/entry.ts'
 import { formatByteSize } from './byte-size.ts'
+import { SpeedMeter, formatSpeed } from './speed.ts'
 
 type PickerWindow = Window & {
   showSaveFilePicker?: (options: { suggestedName: string }) => Promise<FileSystemFileHandle>
@@ -92,6 +93,10 @@ const home = find('home')
 const room = find('room')
 const fileInput = find<HTMLInputElement>('file-input')
 const session = new Session(render)
+session.autoReconnect = true
+const speed = new SpeedMeter()
+let speedTransfer: Transfer | undefined
+const baseTitle = document.title
 let roomMarkup = ''
 let keyValue = ''
 let keyRoom = ''
@@ -100,7 +105,17 @@ let copyRequest = 0
 let fileTarget: Transfer | undefined
 let saveMarkup = ''
 let lastTransferPhase = ''
+let lastRequest: string | undefined
 let scheduled = false
+
+// A hidden tab cannot be seen, so surface the event in its title until it is focused again.
+function alertTab(text: string) {
+  if (document.hidden) document.title = `（${text}）${baseTitle}`
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) document.title = baseTitle
+})
 
 function html(value: string) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
@@ -147,7 +162,7 @@ function transferMarkup() {
       ${progress ? '<div class="progress"><progress id="progress" aria-label="已写入的字节数" max="1" value="0"></progress><span id="progress-text"></span></div>' : ''}
       ${view?.message ? `<p class="muted">${html(view.message)}</p>` : ''}
       ${session.switchingRelay ? '<p class="muted" role="status">正在协调中继切换，完成后可传输文件。</p>' : ''}
-      ${phase === 'idle' && free ? '<p class="muted">点击上方“选择文件”即可发送；双方任意一台设备均可发起传输。</p>' : ''}
+      ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送；双方任意一台设备均可发起传输。</p>' : ''}
       ${phase === 'offered' ? '<div class="button-row"><button class="primary" type="button" data-action="save">选择位置并接收</button><button class="secondary" type="button" data-action="cancel">拒收</button></div>' : ''}
       ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
       ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
@@ -212,7 +227,7 @@ function roomContent() {
     <div class="room-header">
       <div><span class="muted">房间码</span> <strong class="code"><bdi>${code}</bdi></strong></div>
       <div class="button-row compact">
-        ${host ? '<button class="plain" type="button" data-action="copy">复制房间码</button>' : ''}
+        ${host ? '<button class="plain" type="button" data-action="copy">复制邀请链接</button>' : ''}
         <button class="plain leave" type="button" data-action="leave">离开房间</button>
       </div>
     </div>
@@ -221,7 +236,7 @@ function roomContent() {
       <h2 id="room-heading" tabindex="-1">${heading}</h2>
       ${session.mode === 'relay' && session.phase === 'connected' ? `<span class="balance" id="relay-balance"></span>` : ''}
     </div>
-    ${lobby && host && !session.requestId && !session.busy ? `<p class="muted">请将上方 4 位房间码分享给对方；对方申请加入后在此确认即可连通。${expiry ? `（有效至 ${expiry}）` : ''}</p>` : ''}
+    ${lobby && host && !session.requestId && !session.busy ? `<p class="muted">请把邀请链接或上方 4 位房间码分享给对方；对方申请加入后在此确认即可连通。${expiry ? `（有效至 ${expiry}）` : ''}</p>` : ''}
     ${lobby && !host && !session.requestId ? `<p class="muted">已向房主发出加入申请，请等待对方确认同意…</p>` : ''}
     ${session.requestId ? `
       <p class="muted">对方正在申请加入此房间，是否同意建立传输连接？</p>
@@ -331,12 +346,29 @@ function draw() {
     progress.max = view.size || 1
     progress.value = view.size ? view.bytes : view.phase === 'done' ? 1 : 0
     const percent = view.size ? Math.min(100, Math.round((view.bytes / view.size) * 100)) : (view.phase === 'done' ? 100 : 0)
-    setText('progress-text', `已写入 ${formatByteSize(view.bytes)} / ${formatByteSize(view.size)} (${percent}%)`)
+    const transfer = session.transfer
+    if (transfer !== speedTransfer || view.phase === 'saving' || view.bytes === 0) {
+      speed.reset()
+      speedTransfer = transfer
+    }
+    const now = performance.now()
+    let rate = ''
+    if (view.phase === 'sending' || view.phase === 'receiving') {
+      speed.add(view.bytes, now)
+      rate = formatSpeed(speed.rate(now), view.size - view.bytes)
+    }
+    setText('progress-text', `已写入 ${formatByteSize(view.bytes)} / ${formatByteSize(view.size)} (${percent}%)${rate && ` · ${rate}`}`)
   }
   const transferPhase = view?.phase ?? ''
   if (transferPhase !== lastTransferPhase) {
     setText('announcement', transferPhase ? (phases[view!.phase] || '') : '')
     lastTransferPhase = transferPhase
+    if (transferPhase === 'offered') alertTab('收到文件')
+    else if (transferPhase === 'done') alertTab('传输完成')
+  }
+  if (session.requestId !== lastRequest) {
+    lastRequest = session.requestId
+    if (lastRequest) alertTab('有人申请加入')
   }
   const unknown = session.unconfirmedSave
   const detached = session.detachedSave
@@ -402,10 +434,10 @@ app.addEventListener('click', event => {
       if (session.code) {
         const code = session.code
         const request = ++copyRequest
-        const copying = navigator.clipboard?.writeText(code) ?? Promise.reject()
+        const copying = navigator.clipboard?.writeText(`${location.origin}/#${code}`) ?? Promise.reject()
         void copying.then(
-          () => { if (copyRequest === request && session.code === code) copyMessage = '房间码已复制到剪贴板。' },
-          () => { if (copyRequest === request && session.code === code) copyMessage = '无法自动复制，请手动选中房间码。' },
+          () => { if (copyRequest === request && session.code === code) copyMessage = '邀请链接已复制到剪贴板。' },
+          () => { if (copyRequest === request && session.code === code) copyMessage = '无法自动复制，请手动分享上方房间码。' },
         ).finally(render)
       }
       break
@@ -479,6 +511,57 @@ document.addEventListener('keydown', event => {
     trigger.dataset.tipDismissed = ''
   }
 })
+
+const droppable = () => session.phase === 'connected' && Boolean(session.transfer?.canOffer) &&
+  !session.switchingRelay && !session.savingAfterDisconnect
+const hasFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') === true
+const console_ = document.querySelector<HTMLElement>('.console')!
+
+// Always cancel the default so a missed drop never navigates away from an active room.
+document.addEventListener('dragover', event => {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  const accepted = droppable()
+  event.dataTransfer!.dropEffect = accepted ? 'copy' : 'none'
+  console_.classList.toggle('dragging', accepted)
+})
+document.addEventListener('dragleave', event => {
+  if (!event.relatedTarget) console_.classList.remove('dragging')
+})
+document.addEventListener('drop', event => {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  console_.classList.remove('dragging')
+  const transfer = session.transfer
+  const files = event.dataTransfer!.files
+  if (!droppable() || !transfer || !files.length) return
+  const entry = event.dataTransfer!.items[0]?.webkitGetAsEntry?.()
+  if (files.length > 1 || (entry && !entry.isFile)) {
+    session.message = '一次只能发送一个文件，请逐个发送。'
+    render()
+    return
+  }
+  session.message = ''
+  transfer.offer(files[0])
+})
+
+// Closing the tab mid-transfer silently aborts it, so ask first.
+window.addEventListener('beforeunload', event => {
+  const phase = session.transfer?.view.phase
+  if (phase === 'sending' || phase === 'receiving' || phase === 'saving' || phase === 'confirming' || session.savingAfterDisconnect) {
+    event.preventDefault()
+    event.returnValue = ''
+  }
+})
+
+window.addEventListener('online', () => session.reconnectNow())
+
+// An invite link carries the room code in its fragment; fill it in without joining.
+const invite = /^#(\d{4})$/.exec(location.hash)?.[1]
+if (invite) {
+  history.replaceState(null, '', location.pathname + location.search)
+  find<HTMLInputElement>('join-code').value = invite
+}
 
 draw()
 if (!supportIssue) session.connect()
