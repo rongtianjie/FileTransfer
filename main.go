@@ -207,7 +207,9 @@ func run() error {
 			}
 		}
 	}()
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
@@ -219,6 +221,9 @@ func run() error {
 		err = server.Serve(listener)
 	}
 	if errors.Is(err, http.ErrServerClosed) {
+		// Serve returns as soon as Shutdown starts; wait so in-flight requests finish
+		// before the deferred TURN and listener cleanup runs.
+		<-drained
 		return nil
 	}
 	return err
