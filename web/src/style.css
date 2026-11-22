@@ -372,3 +372,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
 }
 
 .console.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
+
+.invite { display: flex; align-items: center; gap: .9rem; margin-top: .4rem; }
+.invite-qr { flex: none; width: 8.5rem; padding: .5rem; background: #fff; border-radius: 8px; border: 1px solid var(--line); line-height: 0; }
+.invite-qr svg { width: 100%; height: auto; }

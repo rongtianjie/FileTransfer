@@ -130,6 +130,8 @@ let fileTarget: Transfer | undefined
 let saveMarkup = ''
 let lastTransferPhase = ''
 let lastRequest: string | undefined
+let qrLink = ''
+let qrSvg = ''
 let scheduled = false
 
 // A hidden tab cannot be seen, so surface the event in its title until it is focused again.
@@ -264,6 +266,7 @@ function roomContent() {
       ${session.mode === 'relay' && session.phase === 'connected' ? `<span class="balance" id="relay-balance"></span>` : ''}
     </div>
     ${lobby && host && !session.requestId && !session.busy ? `<p class="muted">请把邀请链接或上方 4 位房间码分享给对方；对方申请加入后在此确认即可连通。${expiry ? `（有效至 ${expiry}）` : ''}</p>` : ''}
+    ${lobby && host && !session.requestId && qrSvg ? `<div class="invite"><div class="invite-qr" role="img" aria-label="加入房间的二维码">${qrSvg}</div><p class="muted">用手机扫码即可打开链接并加入。</p></div>` : ''}
     ${lobby && !host && !session.requestId ? `<p class="muted">已向房主发出加入申请，请等待对方确认同意…</p>` : ''}
     ${session.requestId ? `
       <p class="muted">对方正在申请加入此房间，是否同意建立传输连接？</p>
@@ -277,6 +280,21 @@ function roomContent() {
   `
 }
 
+// The QR code is built lazily: most visits never create a room.
+function syncInvite() {
+  const wanted = session.phase === 'lobby' && session.role === 'host' && session.code && !session.requestId
+  const link = wanted ? `${location.origin}/#${session.code}` : ''
+  if (link === qrLink) return
+  qrLink = link
+  qrSvg = ''
+  if (!link) return
+  void import('./qr.ts').then(({ inviteQr, inviteReachable }) => {
+    if (qrLink !== link || !inviteReachable(location.hostname)) return
+    qrSvg = inviteQr(link)
+    render()
+  })
+}
+
 function setText(id: string, value: string) {
   const element = find(id)
   if (element && element.textContent !== value) element.textContent = value
@@ -285,6 +303,7 @@ function setText(id: string, value: string) {
 let previousPhase = session.phase
 function draw() {
   syncAdminRoom(session.adminProof)
+  syncInvite()
   const idle = session.phase === 'idle'
   const active = document.activeElement as HTMLElement | null
   const stateChanged = previousPhase !== session.phase
