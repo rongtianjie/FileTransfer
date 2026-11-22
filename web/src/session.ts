@@ -84,6 +84,7 @@ export class Session {
   adminProof?: string
   upgradeBytes?: number
   retryFile?: File
+  retryFiles: File[] = []
   unconfirmedSave?: { name: string; message: string }
   detachedSave?: { name: string; saved: boolean }
   transfer?: Transfer
@@ -452,6 +453,7 @@ export class Session {
     const transfer: Transfer = new Transfer(channel, this.role === 'host', () => {
       if (this.transfer === transfer) {
         this.retryFile = transfer.retryFile
+        this.retryFiles = transfer.retryFiles
         if (transfer.view.phase === 'unconfirmed') {
           this.unconfirmedSave = { name: transfer.view.name, message: transfer.view.message }
         }
@@ -474,7 +476,7 @@ export class Session {
     this.transfer = transfer
     transfer.canReceive = this.receiveSupported
     transfer.receiveLimit = () => this.receiveLimit()
-    transfer.retryFile = this.retryFile
+    transfer.retryFiles = this.retryFiles
     channel.onopen = () => this.connectionChanged(attempt)
     channel.onclose = channel.onerror = () => this.fail(attempt, '设备之间的数据连接已断开。')
     if (attempt.mode === 'relay') attempt.pathCheck = setInterval(() => void this.checkPath(attempt), 500)
@@ -560,6 +562,7 @@ export class Session {
     this.unlimited = false
     this.upgradeBytes = undefined
     this.retryFile = undefined
+    this.retryFiles = []
     // Save outcomes belong to the page and can arrive after the room closes.
     this.message = message
   }

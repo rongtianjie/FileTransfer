@@ -187,6 +187,11 @@ const phases: Record<string, string> = {
   stopped: '传输已停止',
 }
 
+function retainedLabel() {
+  const [first] = session.retryFiles
+  return !first ? '' : session.retryFiles.length > 1 ? `${first.name} 等 ${session.retryFiles.length} 个文件` : first.name
+}
+
 function acceptButton(batch: number | undefined) {
   if (receiveMode !== 'picker') {
     return `<button class="primary" type="button" data-action="save-local">${batch ? `接收 ${batch} 个文件` : '接收文件'}</button>`
@@ -217,7 +222,7 @@ function transferMarkup() {
       ${phase === 'idle' && free ? '<p class="muted">点击“选择文件”或把文件拖到此处即可发送，可一次选择多个；双方任意一台设备均可发起传输。</p>' : ''}
       ${phase === 'offered' ? `<div class="button-row">${acceptButton(view?.batchTotal)}<button class="secondary" type="button" data-action="cancel">拒收</button></div>${receiveMode === 'picker' ? '' : '<p class="muted">文件会先暂存在浏览器中，接收完成后点击“保存到设备”。</p>'}` : ''}
       ${['waiting', 'picking', 'sending', 'receiving'].includes(phase) ? '<button class="secondary" type="button" data-action="cancel">取消传输</button>' : ''}
-      ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
+      ${free && session.retryFile ? `<button class="secondary retry-file" type="button" data-action="resend">重新发送</button><p class="muted retained">已保留未完成文件：<bdi>${html(retainedLabel())}</bdi></p>` : ''}
     </section>
   `
 }
@@ -298,7 +303,7 @@ function roomContent() {
         <button class="secondary" type="button" data-action="reject" data-request-id="${html(session.requestId)}">拒绝</button>
       </div>` : ''}
     ${session.phase === 'connected' ? transferMarkup() : ''}
-    ${session.phase !== 'connected' && session.retryFile ? `<p class="muted retained">连接恢复后可一键重发：<bdi>${html(session.retryFile.name)}</bdi></p>` : ''}
+    ${session.phase !== 'connected' && session.retryFile ? `<p class="muted retained">连接恢复后可一键重发：<bdi>${html(retainedLabel())}</bdi></p>` : ''}
     ${relayMarkup()}
   `
 }

@@ -82,6 +82,16 @@ export class Transfer {
   retryFile?: File
   // Files of an interrupted batch that still need sending, current one first.
   private retryQueue?: File[]
+
+  get retryFiles(): File[] {
+    return this.retryQueue ?? (this.retryFile ? [this.retryFile] : [])
+  }
+
+  // A reconnect builds a new Transfer, so the owner hands the unsent files back.
+  set retryFiles(files: File[]) {
+    this.retryFile = files[0]
+    this.retryQueue = files.length > 1 ? files : undefined
+  }
   upgradeBytes?: number
   unreportedSave?: { name: string; saved: boolean }
   // Browsers without a streaming save API can still send; they refuse incoming offers.
@@ -209,7 +219,7 @@ export class Transfer {
   }
 
   retry() {
-    const files = this.retryQueue ?? (this.retryFile ? [this.retryFile] : [])
+    const files = this.retryFiles
     if (files.length) this.offerFiles(files)
   }
 

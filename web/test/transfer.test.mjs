@@ -420,3 +420,20 @@ test('a file larger than this device can take is refused with a clear reason', a
   guest.cancel()
   await until(() => host.view.phase === 'stopped')
 })
+
+test('the unsent files can be handed to a new transfer after a reconnect', async () => {
+  const first = pair()
+  first.host.offerFiles([new File(['1'], 'a.txt'), new File(['2'], 'b.txt'), new File(['3'], 'c.txt')])
+  await until(() => first.guest.view.phase === 'offered')
+  first.guest.cancel()
+  await until(() => first.host.view.phase === 'stopped')
+  const pending = first.host.retryFiles
+  assert.deepEqual(pending.map(file => file.name), ['a.txt', 'b.txt', 'c.txt'])
+  first.host.dispose(); first.guest.dispose()
+  const second = pair()
+  second.host.retryFiles = pending
+  second.host.retry()
+  await until(() => second.guest.view.phase === 'offered')
+  assert.equal(second.guest.view.batchTotal, 3)
+  second.host.dispose(); second.guest.dispose()
+})
