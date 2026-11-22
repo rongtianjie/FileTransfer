@@ -92,7 +92,7 @@ docker compose up -d --build --wait
 services:
   filetransfer:
     build: !reset null
-    image: docker.io/johnnyrong/filetransfer:1.1.0
+    image: docker.io/johnnyrong/filetransfer:1.2.0
 ```
 
 ```sh
@@ -101,7 +101,7 @@ docker compose pull filetransfer
 docker compose up -d --no-build --wait
 ```
 
-示例固定使用 `1.1.0`。升级时将 `image` 改成目标版本并重新执行上述命令。也可使用 `latest` 标签，每次更新时先运行 `docker compose pull filetransfer`。在原部署上切换方式时，继续使用同一部署目录和 Compose 项目名，服务会继续使用原数据卷。
+示例固定使用 `1.2.0`。升级时将 `image` 改成目标版本并重新执行上述命令。也可使用 `latest` 标签，每次更新时先运行 `docker compose pull filetransfer`。在原部署上切换方式时，继续使用同一部署目录和 Compose 项目名，服务会继续使用原数据卷。
 
 ### 防火墙与启动验证
 
